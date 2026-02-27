@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://skladbot-rhoo.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
+# Хранилище сессий редактирования
 edit_sessions = {}
 
 def parse_contact(contact_json):
@@ -160,17 +161,22 @@ def handle_pending_orders(message):
 def handle_confirm(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[1]
+    logger.info(f"✅ Нажата кнопка подтверждения заказа {order_num}")
+
     order = get_order_by_number(order_num)
     if not order:
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
+
     seller = get_seller_by_telegram_id(user_id)
     if not seller or order['seller_id'] != seller['id']:
         bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
         return
+
     if order.get('stock_processed'):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
+
     for item in order['items']:
         update_product_stock(
             product_id=item['productId'],
@@ -179,7 +185,9 @@ def handle_confirm(call):
             order_id=order['id'],
             seller_id=seller['id']
         )
+
     mark_order_as_processed(order['id'])
+
     bot.answer_callback_query(call.id, "✅ Продажа зафиксирована")
     bot.edit_message_text(
         f"✅ Заказ {order_num} проведён.",
@@ -193,7 +201,7 @@ def handle_confirm(call):
 def handle_edit(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[1]
-    logger.info(f"✏️ handle_edit: пользователь {user_id} редактирует заказ {order_num}")
+    logger.info(f"✏️ Нажата кнопка редактирования заказа {order_num}")
 
     order = get_order_by_number(order_num)
     if not order:
@@ -261,6 +269,7 @@ def select_product(call):
     parts = call.data.split('_')
     order_num = parts[2]
     product_id = int(parts[3])
+    logger.info(f"🔘 Выбран товар {product_id} для заказа {order_num}")
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
@@ -280,6 +289,7 @@ def select_product(call):
     bot.answer_callback_query(call.id)
 
 def process_quantity_input(message, user_id, order_num, product_id):
+    logger.info(f"📝 Ввод количества для товара {product_id}, заказ {order_num}")
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
         bot.reply_to(message, "❌ Сессия редактирования истекла. Начните заново.")
@@ -295,6 +305,7 @@ def process_quantity_input(message, user_id, order_num, product_id):
         return
 
     session['selected_items'][product_id] = qty
+    logger.info(f"✅ Количество для товара {product_id} установлено: {qty}")
 
     products = get_all_products()
     product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
@@ -318,6 +329,7 @@ def confirm_item(call):
     parts = call.data.split('_')
     order_num = parts[2]
     product_id = int(parts[3])
+    logger.info(f"✅ Подтверждён товар {product_id} для заказа {order_num}")
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
@@ -334,6 +346,7 @@ def change_item(call):
     parts = call.data.split('_')
     order_num = parts[2]
     product_id = int(parts[3])
+    logger.info(f"✏️ Изменение товара {product_id} для заказа {order_num}")
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
@@ -356,6 +369,7 @@ def cancel_item(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
     order_num = parts[2]
+    logger.info(f"❌ Отмена выбора товара для заказа {order_num}")
 
     session = edit_sessions.get(user_id)
     if session and session['order_number'] == order_num:
@@ -367,6 +381,7 @@ def cancel_item(call):
 def finish_edit(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[2]
+    logger.info(f"🏁 Завершение редактирования заказа {order_num}")
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
@@ -418,6 +433,7 @@ def finish_edit(call):
 def apply_edit(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[2]
+    logger.info(f"✅ Применение изменений для заказа {order_num}")
 
     session = edit_sessions.pop(user_id, None)
     if not session or session['order_number'] != order_num:
@@ -469,6 +485,7 @@ def apply_edit(call):
 def finish_no_changes(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[3]
+    logger.info(f"✅ Подтверждение заказа {order_num} без изменений")
 
     session = edit_sessions.pop(user_id, None)
     if not session or session['order_number'] != order_num:
@@ -511,6 +528,7 @@ def finish_no_changes(call):
 def edit_again(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[2]
+    logger.info(f"✏️ Повторное редактирование заказа {order_num}")
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
@@ -525,6 +543,7 @@ def edit_again(call):
 def edit_cancel(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[2]
+    logger.info(f"❌ Отмена редактирования заказа {order_num}")
 
     session = edit_sessions.pop(user_id, None)
     if session and session['order_number'] == order_num:
