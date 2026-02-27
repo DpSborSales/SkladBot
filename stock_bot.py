@@ -411,6 +411,8 @@ def apply_edit(call):
 
     order = get_order_by_number(session['order_number'])
     if not order:
+        # Логируем для отладки
+        logger.error(f"Заказ {session['order_number']} не найден в базе")
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
 
@@ -583,9 +585,6 @@ def index():
 
 if __name__ == '__main__':
     bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL)
-    logger.info(f"Webhook set to {WEBHOOK_URL}")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
     bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
