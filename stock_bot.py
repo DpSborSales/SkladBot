@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://skladbot-rhoo.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
-# Хранилище сессий редактирования
 edit_sessions = {}
 
 def parse_contact(contact_json):
@@ -97,19 +96,16 @@ def main_keyboard():
     return keyboard
 
 def format_selected_summary(selected_items, product_names):
-    """Формирует многострочную сводку выбранных товаров."""
     if not selected_items:
         return ""
     lines = []
     for pid, qty in selected_items.items():
         name = product_names.get(pid, f"Товар {pid}")
         lines.append(f"{name} – {qty} упаковок")
-    
     if len(lines) == 1:
         items_lines = lines[0] + "."
     else:
         items_lines = "\n".join([f"{line}," for line in lines[:-1]] + [f"{lines[-1]}."])
-    
     return f"Вы продали:\n{items_lines}\n\nВерно?"
 
 @bot.message_handler(commands=['start'])
@@ -231,7 +227,8 @@ def handle_edit(call):
 
     edit_sessions[user_id] = {
         'order_number': order_num,
-        'selected_items': {},  # здесь будут только товары, которые продавец выбрал при редактировании
+        'original_items': {item['productId']: item['quantity'] for item in order['items']},
+        'selected_items': {},
         'message_id': call.message.message_id,
         'chat_id': call.message.chat.id
     }
@@ -273,6 +270,10 @@ def show_product_selection(user_id):
 def select_product(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
+    if len(parts) < 3:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
     order_num = parts[1]
     product_id = int(parts[2])
     logger.info(f"🔘 Выбран товар {product_id} для заказа {order_num}")
@@ -333,8 +334,17 @@ def process_quantity_input(message, user_id, order_num, product_id):
 def confirm_item(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
+    if len(parts) < 4:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
     order_num = parts[2]
-    product_id = int(parts[3])
+    try:
+        product_id = int(parts[3])
+    except ValueError:
+        logger.warning(f"Неверный product_id: {parts[3]}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
     logger.info(f"✅ Подтверждён товар {product_id} для заказа {order_num}")
 
     session = edit_sessions.get(user_id)
@@ -350,8 +360,17 @@ def confirm_item(call):
 def change_item(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
+    if len(parts) < 4:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
     order_num = parts[2]
-    product_id = int(parts[3])
+    try:
+        product_id = int(parts[3])
+    except ValueError:
+        logger.warning(f"Неверный product_id: {parts[3]}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
     logger.info(f"✏️ Изменение товара {product_id} для заказа {order_num}")
 
     session = edit_sessions.get(user_id)
@@ -374,6 +393,10 @@ def change_item(call):
 def cancel_item(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
+    if len(parts) < 3:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
     order_num = parts[2]
     logger.info(f"❌ Отмена выбора товара для заказа {order_num}")
 
@@ -386,7 +409,12 @@ def cancel_item(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('finish_'))
 def finish_edit(call):
     user_id = call.from_user.id
-    order_num = call.data.split('_')[1]
+    parts = call.data.split('_')
+    if len(parts) < 2:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
+    order_num = parts[1]
     logger.info(f"🏁 Завершение редактирования заказа {order_num}")
 
     session = edit_sessions.get(user_id)
@@ -438,7 +466,12 @@ def finish_edit(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('apply_edit_'))
 def apply_edit(call):
     user_id = call.from_user.id
-    order_num = call.data.split('_')[2]
+    parts = call.data.split('_')
+    if len(parts) < 3:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
+    order_num = parts[2]
     logger.info(f"✅ Применение изменений для заказа {order_num}")
 
     session = edit_sessions.pop(user_id, None)
@@ -461,7 +494,6 @@ def apply_edit(call):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
-    # Списываем только те товары, которые продавец указал в selected_items
     selected = session['selected_items']
     if not selected:
         bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
@@ -491,7 +523,12 @@ def apply_edit(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('finish_no_changes_'))
 def finish_no_changes(call):
     user_id = call.from_user.id
-    order_num = call.data.split('_')[3]
+    parts = call.data.split('_')
+    if len(parts) < 4:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
+    order_num = parts[3]
     logger.info(f"✅ Подтверждение заказа {order_num} без изменений")
 
     session = edit_sessions.pop(user_id, None)
@@ -534,7 +571,12 @@ def finish_no_changes(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_again_'))
 def edit_again(call):
     user_id = call.from_user.id
-    order_num = call.data.split('_')[2]
+    parts = call.data.split('_')
+    if len(parts) < 3:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
+    order_num = parts[2]
     logger.info(f"✏️ Повторное редактирование заказа {order_num}")
 
     session = edit_sessions.get(user_id)
@@ -549,7 +591,12 @@ def edit_again(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_cancel_'))
 def edit_cancel(call):
     user_id = call.from_user.id
-    order_num = call.data.split('_')[2]
+    parts = call.data.split('_')
+    if len(parts) < 3:
+        logger.warning(f"Некорректный callback: {call.data}")
+        bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        return
+    order_num = parts[2]
     logger.info(f"❌ Отмена редактирования заказа {order_num}")
 
     session = edit_sessions.pop(user_id, None)
