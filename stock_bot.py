@@ -245,9 +245,9 @@ def show_product_selection(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
     buttons = []
     for p in products:
-        buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"select_product_{session['order_number']}_{p['id']}"))
+        buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"select_{session['order_number']}_{p['id']}"))
     markup.add(*buttons)
-    markup.row(types.InlineKeyboardButton("✅ Завершить редактирование", callback_data=f"finish_edit_{session['order_number']}"))
+    markup.row(types.InlineKeyboardButton("✅ Завершить редактирование", callback_data=f"finish_{session['order_number']}"))
 
     text = f"✏️ *Редактирование заказа {session['order_number']}*\n\n"
     if summary:
@@ -263,19 +263,18 @@ def show_product_selection(user_id):
     )
     logger.info(f"Показано меню выбора товара для заказа {session['order_number']}")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('select_product_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('select_'))
 def select_product(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
-    product_id = int(parts[3])  # формат: select_product_номерзаказа_idтовара
+    order_num = parts[1]
+    product_id = int(parts[2])
+    logger.info(f"🔘 Выбран товар {product_id} для заказа {order_num}")
 
     session = edit_sessions.get(user_id)
-    if not session:
+    if not session or session['order_number'] != order_num:
         bot.answer_callback_query(call.id, "❌ Сессия истекла")
         return
-
-    order_num = session['order_number']
-    logger.info(f"🔘 Выбран товар {product_id} для заказа {order_num}")
 
     products = get_all_products()
     product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
@@ -286,17 +285,15 @@ def select_product(call):
         session['message_id'],
         parse_mode='Markdown'
     )
-    bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, product_id)
+    bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id)
     bot.answer_callback_query(call.id)
 
-def process_quantity_input(message, user_id, product_id):
+def process_quantity_input(message, user_id, order_num, product_id):
+    logger.info(f"📝 Ввод количества для товара {product_id}, заказ {order_num}")
     session = edit_sessions.get(user_id)
-    if not session:
+    if not session or session['order_number'] != order_num:
         bot.reply_to(message, "❌ Сессия редактирования истекла. Начните заново.")
         return
-
-    order_num = session['order_number']
-    logger.info(f"📝 Ввод количества для товара {product_id}, заказ {order_num}")
 
     try:
         qty = int(message.text.strip())
@@ -330,7 +327,6 @@ def process_quantity_input(message, user_id, product_id):
 def confirm_item(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
-    # формат: confirm_item_номерзаказа_idтовара
     order_num = parts[2]
     product_id = int(parts[3])
     logger.info(f"✅ Подтверждён товар {product_id} для заказа {order_num}")
@@ -365,7 +361,7 @@ def change_item(call):
         f"Введите новое количество для товара *{product_name}*:",
         parse_mode='Markdown'
     )
-    bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, product_id)
+    bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id)
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_item_'))
@@ -381,10 +377,10 @@ def cancel_item(call):
         show_product_selection(user_id)
     bot.answer_callback_query(call.id)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('finish_edit_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('finish_'))
 def finish_edit(call):
     user_id = call.from_user.id
-    order_num = call.data.split('_')[2]
+    order_num = call.data.split('_')[1]
     logger.info(f"🏁 Завершение редактирования заказа {order_num}")
 
     session = edit_sessions.get(user_id)
