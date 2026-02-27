@@ -56,13 +56,17 @@ def get_seller_by_telegram_id(telegram_id: int):
             return cur.fetchone()
 
 def get_order_by_number(order_number: str):
+    logger.info(f"🔍 get_order_by_number: ищем заказ с номером '{order_number}'")
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
             order = cur.fetchone()
             if order:
+                logger.info(f"✅ Заказ найден: id={order['id']}, status={order['status']}")
                 order['contact'] = parse_contact(order['contact'])
                 order['items'] = parse_items(order['items'])
+            else:
+                logger.warning(f"❌ Заказ '{order_number}' не найден в таблице orders")
             return order
 
 def get_all_products():
@@ -409,10 +413,11 @@ def apply_edit(call):
         bot.answer_callback_query(call.id, "❌ Сессия истекла")
         return
 
-    order = get_order_by_number(session['order_number'])
+    order_num = session['order_number']
+    logger.info(f"🔄 apply_edit: пытаемся найти заказ '{order_num}'")
+    order = get_order_by_number(order_num)
     if not order:
-        # Логируем для отладки
-        logger.error(f"Заказ {session['order_number']} не найден в базе")
+        logger.error(f"❌ apply_edit: заказ '{order_num}' не найден в базе")
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
 
