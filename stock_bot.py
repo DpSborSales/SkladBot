@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
-ADMIN_ID = int(os.getenv('ADMIN_ID', 0))  # можно использовать тот же ADMIN_ID, но для уведомлений об ошибках
+ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 PORT = int(os.getenv('PORT', 10000))
 
 if not BOT_TOKEN or not DATABASE_URL:
@@ -24,8 +24,26 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://dp-sbor-stock-bot.onrender.com')
+BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://skladbot-rhoo.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
+
+def parse_contact(contact_json):
+    """Преобразует JSON-строку contact в словарь, если это необходимо."""
+    if isinstance(contact_json, dict):
+        return contact_json
+    try:
+        return json.loads(contact_json)
+    except:
+        return {}
+
+def parse_items(items_json):
+    """Преобразует JSON-строку items в список, если это необходимо."""
+    if isinstance(items_json, list):
+        return items_json
+    try:
+        return json.loads(items_json)
+    except:
+        return []
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -42,7 +60,8 @@ def get_order_by_number(order_number: str):
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
             order = cur.fetchone()
             if order:
-                order['items'] = json.loads(order['items'])
+                order['contact'] = parse_contact(order['contact'])
+                order['items'] = parse_items(order['items'])
             return order
 
 def mark_order_as_processed(order_id: int):
@@ -52,12 +71,9 @@ def mark_order_as_processed(order_id: int):
             conn.commit()
 
 def update_product_stock(product_id: int, change: int, reason: str, order_id: int = None, seller_id: int = None):
-    """Обновляет остаток товара и записывает движение в историю."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Обновляем остаток
             cur.execute("UPDATE products SET stock = stock + %s WHERE id = %s", (change, product_id))
-            # Записываем движение
             cur.execute("""
                 INSERT INTO stock_movements (product_id, quantity_change, reason, order_id, seller_id)
                 VALUES (%s, %s, %s, %s, %s)
@@ -107,7 +123,7 @@ def handle_pending_orders(message):
 
     for order in pending:
         order_number = order['order_number']
-        items = json.loads(order['items'])
+        items = order['items']  # уже список, так как RealDictCursor парсит JSON
         items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in items])
         markup = types.InlineKeyboardMarkup()
         markup.row(
@@ -136,11 +152,10 @@ def handle_confirm(call):
         bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
         return
 
-    if order['stock_processed']:
+    if order.get('stock_processed'):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
-    # Списываем товары
     for item in order['items']:
         update_product_stock(
             product_id=item['productId'],
@@ -174,12 +189,10 @@ def handle_edit(call):
         bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
         return
 
-    if order['stock_processed']:
+    if order.get('stock_processed'):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
-    # Сохраняем в user_data текущий заказ и начинаем диалог
-    # Для простоты реализуем через bot.register_next_step_handler
     markup = types.ForceReply(selective=False)
     msg = bot.send_message(
         call.message.chat.id,
@@ -211,34 +224,28 @@ def process_edit(message, order_num):
         bot.reply_to(message, "❌ Неверный формат. Введите числа через запятую в том же порядке.")
         return
 
-    # Проверяем, что все новые количества неотрицательные
     if any(q < 0 for q in new_quantities):
         bot.reply_to(message, "❌ Количество не может быть отрицательным.")
         return
 
-    # Списываем разницу между новым и старым количеством
     for i, item in enumerate(order['items']):
         old_qty = item['quantity']
         new_qty = new_quantities[i]
-        diff = new_qty - old_qty  # если положительное – продали больше (доп. списание), если отрицательное – вернули (приход)
+        diff = new_qty - old_qty
         if diff != 0:
             update_product_stock(
                 product_id=item['productId'],
-                change=-diff,  # для списания: diff>0 -> -diff (списываем дополнительно), diff<0 -> -diff (приход)
+                change=-diff,
                 reason='correction',
                 order_id=order['id'],
                 seller_id=seller['id']
             )
-            # Обновляем количество в заказе? Можно обновить, но для истории достаточно движения.
-            # При желании можно обновить items в таблице orders.
 
     mark_order_as_processed(order['id'])
 
     bot.reply_to(message, f"✅ Заказ {order_num} обработан с изменениями.")
-    # Убираем клавиатуру редактирования
     bot.send_message(message.chat.id, "Вернуться к списку: /pending")
 
-# Эндпоинт для уведомлений от основного бота
 @app.route('/api/order-completed', methods=['POST'])
 def order_completed():
     try:
@@ -251,8 +258,7 @@ def order_completed():
         if not order:
             return jsonify({'error': 'Order not found'}), 404
 
-        # Если заказ уже обработан, ничего не делаем
-        if order['stock_processed']:
+        if order.get('stock_processed'):
             return jsonify({'status': 'already_processed'}), 200
 
         seller_id = order['seller_id']
@@ -264,7 +270,6 @@ def order_completed():
                     return jsonify({'error': 'Seller not found'}), 404
                 seller_tg = seller['telegram_id']
 
-        # Отправляем продавцу уведомление
         items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in order['items']])
         markup = types.InlineKeyboardMarkup()
         markup.row(
