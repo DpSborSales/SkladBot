@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://skladbot-rhoo.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
+# Хранилище сессий редактирования
 edit_sessions = {}
 
 def parse_contact(contact_json):
@@ -230,8 +231,7 @@ def handle_edit(call):
 
     edit_sessions[user_id] = {
         'order_number': order_num,
-        'original_items': {item['productId']: item['quantity'] for item in order['items']},
-        'selected_items': {},
+        'selected_items': {},  # здесь будут только товары, которые продавец выбрал при редактировании
         'message_id': call.message.message_id,
         'chat_id': call.message.chat.id
     }
@@ -461,24 +461,25 @@ def apply_edit(call):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
-    original = session['original_items']
+    # Списываем только те товары, которые продавец указал в selected_items
     selected = session['selected_items']
+    if not selected:
+        bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
+        return
 
-    all_product_ids = set(original.keys()) | set(selected.keys())
-    for pid in all_product_ids:
-        old_qty = original.get(pid, 0)
-        new_qty = selected.get(pid, 0)
-        diff = new_qty - old_qty
-        if diff != 0:
+    for product_id, qty in selected.items():
+        if qty > 0:
             update_product_stock(
-                product_id=pid,
-                change=-diff,
-                reason='correction',
+                product_id=product_id,
+                change=-qty,
+                reason='sale',
                 order_id=order['id'],
                 seller_id=seller['id']
             )
+            logger.info(f"✅ Списано {qty} ед. товара {product_id}")
 
     mark_order_as_processed(order['id'])
+    logger.info(f"✅ Заказ {order_num} обработан, списано товаров: {len(selected)}")
 
     bot.edit_message_text(
         f"✅ Заказ {order_num} обработан.",
