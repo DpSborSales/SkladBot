@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://skladbot-rhoo.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
-# Хранилище сессий редактирования (может использоваться для временных данных, но номер заказа теперь в callback)
+# Хранилище сессий редактирования
 edit_sessions = {}
 
 def parse_contact(contact_json):
@@ -56,17 +56,13 @@ def get_seller_by_telegram_id(telegram_id: int):
             return cur.fetchone()
 
 def get_order_by_number(order_number: str):
-    logger.info(f"🔍 get_order_by_number: ищем заказ с номером '{order_number}'")
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
             order = cur.fetchone()
             if order:
-                logger.info(f"✅ Заказ найден: id={order['id']}, status={order['status']}")
                 order['contact'] = parse_contact(order['contact'])
                 order['items'] = parse_items(order['items'])
-            else:
-                logger.warning(f"❌ Заказ '{order_number}' не найден в таблице orders")
             return order
 
 def get_all_products():
@@ -95,6 +91,16 @@ def main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add(types.KeyboardButton("📋 Ожидают обработки"))
     return keyboard
+
+def format_selected_summary(selected_items, product_names):
+    """Формирует строку с перечнем выбранных товаров для отображения над списком."""
+    if not selected_items:
+        return ""
+    lines = []
+    for pid, qty in selected_items.items():
+        name = product_names.get(pid, f"Товар {pid}")
+        lines.append(f"{name} – {qty} упаковок")
+    return "Вы продали " + ", ".join(lines) + "?"
 
 @bot.message_handler(commands=['start'])
 def handle_start(message):
@@ -148,7 +154,7 @@ def handle_pending_orders(message):
             reply_markup=markup
         )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_') and not call.data.startswith('confirm_item_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_'))
 def handle_confirm(call):
     user_id = call.from_user.id
     order_num = call.data.split('_')[1]
@@ -185,7 +191,7 @@ def handle_confirm(call):
         call.message.message_id
     )
 
-# ==================== РЕДАКТИРОВАНИЕ С НОМЕРОМ ЗАКАЗА В CALLBACK ====================
+# ==================== НОВОЕ РЕДАКТИРОВАНИЕ ====================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_'))
 def handle_edit(call):
@@ -212,11 +218,11 @@ def handle_edit(call):
         bot.answer_callback_query(call.id, "❌ Нет товаров в каталоге")
         return
 
-    # Создаём сессию редактирования, сохраняем исходные количества и номер заказа
+    # Создаём сессию редактирования
     edit_sessions[user_id] = {
         'order_number': order_num,
         'original_items': {item['productId']: item['quantity'] for item in order['items']},
-        'selected_items': {},  # {product_id: quantity}
+        'selected_items': {},  # будет заполняться выбранными товарами
         'message_id': call.message.message_id,
         'chat_id': call.message.chat.id
     }
@@ -230,21 +236,23 @@ def show_product_selection(user_id):
         return
 
     products = get_all_products()
+    product_names = {p['id']: p['name'] for p in products}
+    summary = format_selected_summary(session['selected_items'], product_names)
+
     markup = types.InlineKeyboardMarkup(row_width=2)
     buttons = []
     for p in products:
-        # В callback_data добавляем номер заказа и ID товара
-        buttons.append(types.InlineKeyboardButton(
-            p['name'],
-            callback_data=f"select_product_{session['order_number']}_{p['id']}"
-        ))
+        buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"select_product_{session['order_number']}_{p['id']}"))
     markup.add(*buttons)
-    # Добавляем кнопку завершения
     markup.row(types.InlineKeyboardButton("✅ Завершить редактирование", callback_data=f"finish_edit_{session['order_number']}"))
 
+    text = f"✏️ *Редактирование заказа {session['order_number']}*\n\n"
+    if summary:
+        text += summary + "\n\n"
+    text += "Выберите товар, чтобы указать проданное количество:"
+
     bot.edit_message_text(
-        f"✏️ *Редактирование заказа {session['order_number']}*\n\n"
-        "Выберите товар, чтобы указать проданное количество:",
+        text,
         session['chat_id'],
         session['message_id'],
         parse_mode='Markdown',
@@ -261,14 +269,13 @@ def select_product(call):
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
-        bot.answer_callback_query(call.id, "❌ Сессия истекла или не соответствует заказу")
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
         return
 
     # Получаем название товара
     products = get_all_products()
     product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
 
-    session['current_product'] = product_id
     bot.edit_message_text(
         f"Введите количество для товара *{product_name}*:",
         session['chat_id'],
@@ -290,11 +297,10 @@ def process_quantity_input(message, user_id, order_num, product_id):
             raise ValueError
     except:
         bot.reply_to(message, "❌ Введите целое неотрицательное число.")
-        # Возвращаемся к выбору товара
         show_product_selection(user_id)
         return
 
-    # Сохраняем количество во временной сессии
+    # Сохраняем или перезаписываем количество в сессии
     session['selected_items'][product_id] = qty
     # Получаем название товара
     products = get_all_products()
@@ -326,8 +332,6 @@ def confirm_item(call):
         bot.answer_callback_query(call.id, "❌ Сессия истекла")
         return
 
-    # Товар уже сохранён в selected_items
-    # Возвращаемся к выбору следующего товара
     bot.delete_message(session['chat_id'], call.message.message_id)
     show_product_selection(user_id)
     bot.answer_callback_query(call.id)
@@ -361,8 +365,7 @@ def change_item(call):
 def cancel_item(call):
     user_id = call.from_user.id
     parts = call.data.split('_')
-    # parts: ['cancel', 'item', order_num]
-    order_num = parts[2]
+    order_num = parts[2]  # cancel_item_order_num
 
     session = edit_sessions.get(user_id)
     if session and session['order_number'] == order_num:
@@ -373,9 +376,7 @@ def cancel_item(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('finish_edit_'))
 def finish_edit(call):
     user_id = call.from_user.id
-    parts = call.data.split('_')
-    # parts: ['finish', 'edit', order_num]
-    order_num = parts[2]
+    order_num = call.data.split('_')[2]  # finish_edit_order_num
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
@@ -428,19 +429,15 @@ def finish_edit(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('apply_edit_'))
 def apply_edit(call):
     user_id = call.from_user.id
-    parts = call.data.split('_')
-    # parts: ['apply', 'edit', order_num]
-    order_num = parts[2]
+    order_num = call.data.split('_')[2]  # apply_edit_order_num
 
     session = edit_sessions.pop(user_id, None)
     if not session or session['order_number'] != order_num:
         bot.answer_callback_query(call.id, "❌ Сессия истекла")
         return
 
-    logger.info(f"🔄 apply_edit: пытаемся найти заказ '{order_num}'")
     order = get_order_by_number(order_num)
     if not order:
-        logger.error(f"❌ apply_edit: заказ '{order_num}' не найден в базе")
         bot.answer_callback_query(call.id, "❌ Заказ не найден")
         return
 
@@ -465,7 +462,7 @@ def apply_edit(call):
         if diff != 0:
             update_product_stock(
                 product_id=pid,
-                change=-diff,
+                change=-diff,  # если diff>0, списываем дополнительно; если diff<0 – возвращаем
                 reason='correction',
                 order_id=order['id'],
                 seller_id=seller['id']
@@ -483,9 +480,7 @@ def apply_edit(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('finish_no_changes_'))
 def finish_no_changes(call):
     user_id = call.from_user.id
-    parts = call.data.split('_')
-    # parts: ['finish', 'no', 'changes', order_num]
-    order_num = parts[3]
+    order_num = call.data.split('_')[3]  # finish_no_changes_order_num
 
     session = edit_sessions.pop(user_id, None)
     if not session or session['order_number'] != order_num:
@@ -528,9 +523,7 @@ def finish_no_changes(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_again_'))
 def edit_again(call):
     user_id = call.from_user.id
-    parts = call.data.split('_')
-    # parts: ['edit', 'again', order_num]
-    order_num = parts[2]
+    order_num = call.data.split('_')[2]  # edit_again_order_num
 
     session = edit_sessions.get(user_id)
     if not session or session['order_number'] != order_num:
@@ -545,9 +538,7 @@ def edit_again(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_cancel_'))
 def edit_cancel(call):
     user_id = call.from_user.id
-    parts = call.data.split('_')
-    # parts: ['edit', 'cancel', order_num]
-    order_num = parts[2]
+    order_num = call.data.split('_')[2]  # edit_cancel_order_num
 
     session = edit_sessions.pop(user_id, None)
     if session and session['order_number'] == order_num:
