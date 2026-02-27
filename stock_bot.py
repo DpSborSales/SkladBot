@@ -208,7 +208,7 @@ def handle_edit(call):
         bot.answer_callback_query(call.id, "❌ Нет товаров в каталоге")
         return
 
-    # Создаём сессию редактирования
+    # Создаём сессию редактирования, сохраняем исходные количества
     edit_sessions[user_id] = {
         'order_number': order_num,
         'original_items': {item['productId']: item['quantity'] for item in order['items']},
@@ -253,11 +253,16 @@ def select_product(call):
         bot.answer_callback_query(call.id, "❌ Сессия истекла")
         return
 
+    # Получаем название товара
+    products = get_all_products()
+    product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+
     session['current_product'] = product_id
     bot.edit_message_text(
-        f"Введите количество для товара:",
+        f"Введите количество для товара *{product_name}*:",
         session['chat_id'],
-        session['message_id']
+        session['message_id'],
+        parse_mode='Markdown'
     )
     bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, product_id)
     bot.answer_callback_query(call.id)
@@ -325,9 +330,13 @@ def change_item(call):
 
     bot.delete_message(session['chat_id'], call.message.message_id)
     session['current_product'] = product_id
+    # Получаем название товара
+    products = get_all_products()
+    product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
     bot.send_message(
         session['chat_id'],
-        "Введите новое количество:"
+        f"Введите новое количество для товара *{product_name}*:",
+        parse_mode='Markdown'
     )
     bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, product_id)
     bot.answer_callback_query(call.id)
@@ -574,6 +583,9 @@ def index():
 
 if __name__ == '__main__':
     bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
     bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
