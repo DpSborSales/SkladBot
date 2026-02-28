@@ -102,15 +102,15 @@ def decrease_seller_stock(seller_id: int, product_id: int, quantity: int, reason
         return
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Проверяем, что достаточно
+            # Проверяем, что достаточно (но не блокируем)
             cur.execute(
                 "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s",
                 (seller_id, product_id)
             )
             row = cur.fetchone()
             if not row or row['quantity'] < quantity:
-                raise ValueError(f"Недостаточно товара (id {product_id}) у продавца {seller_id}")
-            # Уменьшаем остаток
+                logger.warning(f"⚠️ Недостаточно товара (id {product_id}) у продавца {seller_id}: доступно {row['quantity'] if row else 0}, требуется {quantity}. Списание будет выполнено.")
+            # Уменьшаем остаток (может уйти в минус)
             cur.execute(
                 "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND product_id = %s",
                 (quantity, seller_id, product_id)
@@ -141,6 +141,37 @@ def increase_seller_stock(seller_id: int, product_id: int, quantity: int, reason
                 VALUES (%s, %s, %s, %s, %s)
             """, (product_id, quantity, reason, order_id, seller_id))
             conn.commit()
+
+def get_negative_stock_summary(seller_id: int):
+    """Возвращает список товаров с отрицательными остатками у продавца."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT p.name, ss.quantity
+                FROM seller_stock ss
+                JOIN products p ON ss.product_id = p.id
+                WHERE ss.seller_id = %s AND ss.quantity < 0
+                ORDER BY p.name
+            """, (seller_id,))
+            return cur.fetchall()
+
+def send_negative_stock_warning(chat_id, seller_id):
+    """Отправляет предупреждение о наличии отрицательных остатков с кнопкой создания заявки."""
+    negatives = get_negative_stock_summary(seller_id)
+    if not negatives:
+        return
+    lines = [f"• {row['name']}: {abs(row['quantity'])} упаковок" for row in negatives]
+    summary = "\n".join(lines)
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📦 Создать заявку на перемещение", callback_data="create_transfer_request"))
+    bot.send_message(
+        chat_id,
+        f"⚠️ *Внимание!* Вы продали товаров больше, чем было на вашем складе.\n"
+        f"Необходимо произвести перераспределение товаров на ваш склад.\n"
+        f"Сейчас Ваши остатки ушли в минус:\n{summary}",
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
 
 # ==================== КЛАВИАТУРЫ И ФОРМАТИРОВАНИЕ ====================
 
@@ -267,17 +298,6 @@ def handle_confirm(call):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
-    # Проверяем наличие достаточного количества товара у продавца
-    insufficient = []
-    for item in order['items']:
-        available = get_seller_stock(seller['id'], item['productId'])
-        if available < item['quantity']:
-            insufficient.append(f"{item['name']}: нужно {item['quantity']}, доступно {available}")
-    if insufficient:
-        msg = "❌ Недостаточно товара для подтверждения заказа:\n" + "\n".join(insufficient)
-        bot.answer_callback_query(call.id, msg, show_alert=True)
-        return
-
     # Списываем товары
     for item in order['items']:
         decrease_seller_stock(
@@ -296,6 +316,9 @@ def handle_confirm(call):
         call.message.chat.id,
         call.message.message_id
     )
+
+    # Проверяем отрицательные остатки и отправляем предупреждение
+    send_negative_stock_warning(call.message.chat.id, seller['id'])
 
 # ==================== РЕДАКТИРОВАНИЕ ====================
 
@@ -562,22 +585,6 @@ def apply_edit(call):
         bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
         return
 
-    # Проверяем наличие
-    insufficient = []
-    for product_id, qty in selected.items():
-        if qty <= 0:
-            continue
-        available = get_seller_stock(seller['id'], product_id)
-        if available < qty:
-            # Найдём название товара
-            products = get_all_products()
-            name = next((p['name'] for p in products if p['id'] == product_id), f"Товар {product_id}")
-            insufficient.append(f"{name}: нужно {qty}, доступно {available}")
-    if insufficient:
-        msg = "❌ Недостаточно товара для подтверждения:\n" + "\n".join(insufficient)
-        bot.answer_callback_query(call.id, msg, show_alert=True)
-        return
-
     # Списываем
     for product_id, qty in selected.items():
         if qty > 0:
@@ -598,7 +605,9 @@ def apply_edit(call):
         session['chat_id'],
         session['message_id']
     )
-    bot.answer_callback_query(call.id)
+
+    # Проверяем отрицательные остатки и отправляем предупреждение
+    send_negative_stock_warning(session['chat_id'], seller['id'])
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('nochanges_'))
 def no_changes(call):
@@ -625,17 +634,6 @@ def no_changes(call):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
-    # Проверяем наличие исходных позиций
-    insufficient = []
-    for item in order['items']:
-        available = get_seller_stock(seller['id'], item['productId'])
-        if available < item['quantity']:
-            insufficient.append(f"{item['name']}: нужно {item['quantity']}, доступно {available}")
-    if insufficient:
-        msg = "❌ Недостаточно товара для подтверждения:\n" + "\n".join(insufficient)
-        bot.answer_callback_query(call.id, msg, show_alert=True)
-        return
-
     # Списываем исходные количества
     for item in order['items']:
         decrease_seller_stock(
@@ -653,7 +651,9 @@ def no_changes(call):
         session['chat_id'],
         session['message_id']
     )
-    bot.answer_callback_query(call.id)
+
+    # Проверяем отрицательные остатки и отправляем предупреждение
+    send_negative_stock_warning(session['chat_id'], seller['id'])
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editagain_'))
 def edit_again(call):
@@ -684,6 +684,12 @@ def edit_cancel(call):
             session['message_id']
         )
     bot.answer_callback_query(call.id)
+
+# ==================== ОБРАБОТЧИК КНОПКИ СОЗДАНИЯ ЗАЯВКИ ====================
+
+@bot.callback_query_handler(func=lambda call: call.data == "create_transfer_request")
+def handle_create_transfer_request(call):
+    bot.answer_callback_query(call.id, "Функция создания заявки находится в разработке. Скоро будет доступна.", show_alert=True)
 
 # ==================== ЭНДПОИНТ ДЛЯ УВЕДОМЛЕНИЙ ИЗ ОСНОВНОГО БОТА ====================
 
