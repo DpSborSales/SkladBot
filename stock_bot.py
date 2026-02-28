@@ -178,6 +178,7 @@ def send_negative_stock_warning(chat_id, seller_id):
 def main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add(types.KeyboardButton("📋 Ожидают обработки"))
+    keyboard.add(types.KeyboardButton("📦 Мои остатки"), types.KeyboardButton("🔄 Заявка на перемещение"))
     return keyboard
 
 def format_selected_summary(selected_items, product_names):
@@ -209,7 +210,7 @@ def handle_start(message):
         message.chat.id,
         "👋 Добро пожаловать в складской учёт!\n\n"
         "Когда заказ завершён, вы получите уведомление для фиксации продажи.\n"
-        "Используйте кнопку ниже, чтобы посмотреть заказы, ожидающие обработки.",
+        "Используйте кнопки ниже для навигации.",
         reply_markup=main_keyboard()
     )
 
@@ -227,7 +228,7 @@ def handle_stock(message):
                 SELECT p.name, ss.quantity
                 FROM seller_stock ss
                 JOIN products p ON ss.product_id = p.id
-                WHERE ss.seller_id = %s AND ss.quantity > 0
+                WHERE ss.seller_id = %s
                 ORDER BY p.name
             """, (seller['id'],))
             stocks = cur.fetchall()
@@ -236,7 +237,14 @@ def handle_stock(message):
         bot.reply_to(message, "📦 У вас нет товаров на складе.")
         return
 
-    lines = [f"• {row['name']}: {row['quantity']} шт" for row in stocks]
+    lines = []
+    for row in stocks:
+        if row['quantity'] > 0:
+            lines.append(f"• {row['name']}: {row['quantity']} шт")
+        elif row['quantity'] < 0:
+            lines.append(f"• {row['name']}: {row['quantity']} шт (❗ минус)")
+        else:
+            lines.append(f"• {row['name']}: 0 шт")
     bot.reply_to(message, "📦 *Ваши остатки:*\n" + "\n".join(lines), parse_mode='Markdown')
 
 @bot.message_handler(func=lambda m: m.text == "📋 Ожидают обработки")
@@ -275,6 +283,19 @@ def handle_pending_orders(message):
             parse_mode='Markdown',
             reply_markup=markup
         )
+
+@bot.message_handler(func=lambda m: m.text == "📦 Мои остатки")
+def handle_my_stock(message):
+    # Переиспользуем логику команды /stock
+    handle_stock(message)
+
+@bot.message_handler(func=lambda m: m.text == "🔄 Заявка на перемещение")
+def handle_transfer_request(message):
+    bot.reply_to(
+        message,
+        "🚧 Функция создания заявок на перемещение находится в разработке. Скоро она будет доступна!",
+        reply_markup=main_keyboard()
+    )
 
 # ==================== ПОДТВЕРЖДЕНИЕ БЕЗ РЕДАКТИРОВАНИЯ ====================
 
