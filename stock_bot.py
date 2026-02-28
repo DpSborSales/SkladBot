@@ -217,7 +217,7 @@ def get_seller_debt(seller_id: int):
 
             # Сумма всех выплат
             cur.execute("""
-                SELECT COALESCE(SUM(amount), 0) as total_paid
+                SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid
                 FROM seller_payments
                 WHERE seller_id = %s AND status = 'confirmed'
             """, (seller_id,))
@@ -582,8 +582,8 @@ def handle_payment(message):
     msg = (
         f"💰 *Ваш расчётный счёт*\n\n"
         f"Вы должны перевести Админу: *{debt} руб.*\n"
-        f"Ваша чистая прибыль за всё время: *{profit} руб.*\n"
-        f"(Продаж на сумму покупателя: {total_buyer} руб., закупочная стоимость: {total_seller} руб.)"
+        f"___________________________________________\n"
+        f"Ваша чистая прибыль за всё время: *{profit} руб.*"
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("💳 Произвести выплату", callback_data="make_payment"))
@@ -712,7 +712,7 @@ def process_edit_payment(message, payment_id, original_chat_id):
     if not payment:
         bot.reply_to(message, "❌ Заявка не найдена")
         return
-    # Обновляем сумму
+    # Обновляем сумму и подтверждаем
     update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
     seller = get_seller_by_id(payment['seller_id'])
     if seller:
