@@ -28,8 +28,9 @@ logger = logging.getLogger(__name__)
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://skladbot-rhoo.onrender.com')
 WEBHOOK_URL = f"{BASE_URL}/webhook"
 
-# Хранилище сессий редактирования
+# Хранилище сессий редактирования и платежей
 edit_sessions = {}
+payment_sessions = {}
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -81,7 +82,7 @@ def get_order_by_number(order_number: str):
 def get_all_products():
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, name FROM products ORDER BY name")
+            cur.execute("SELECT id, name, price, price_seller FROM products ORDER BY name")
             return cur.fetchall()
 
 def mark_order_as_processed(order_id: int):
@@ -93,7 +94,6 @@ def mark_order_as_processed(order_id: int):
 # ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С ОСТАТКАМИ ====================
 
 def get_seller_stock(seller_id: int, product_id: int) -> int:
-    """Возвращает текущее количество товара у продавца."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -104,7 +104,6 @@ def get_seller_stock(seller_id: int, product_id: int) -> int:
             return result['quantity'] if result else 0
 
 def decrease_seller_stock(seller_id: int, product_id: int, quantity: int, reason: str, order_id: int = None):
-    """Уменьшает остаток товара у продавца на quantity и записывает движение."""
     if quantity <= 0:
         return
     with get_db_connection() as conn:
@@ -127,7 +126,6 @@ def decrease_seller_stock(seller_id: int, product_id: int, quantity: int, reason
             conn.commit()
 
 def increase_seller_stock(seller_id: int, product_id: int, quantity: int, reason: str, order_id: int = None):
-    """Увеличивает остаток товара у продавца на quantity и записывает движение."""
     if quantity <= 0:
         return
     with get_db_connection() as conn:
@@ -145,7 +143,6 @@ def increase_seller_stock(seller_id: int, product_id: int, quantity: int, reason
             conn.commit()
 
 def get_negative_stock_summary(seller_id: int):
-    """Возвращает список товаров с отрицательными остатками у продавца."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -158,7 +155,6 @@ def get_negative_stock_summary(seller_id: int):
             return cur.fetchall()
 
 def send_negative_stock_warning(chat_id, seller_id):
-    """Отправляет предупреждение о наличии отрицательных остатков с кнопкой создания заявки."""
     negatives = get_negative_stock_summary(seller_id)
     if not negatives:
         return
@@ -175,10 +171,9 @@ def send_negative_stock_warning(chat_id, seller_id):
         reply_markup=markup
     )
 
-# ==================== ФУНКЦИИ ДЛЯ ЗАЯВОК ====================
+# ==================== ФУНКЦИИ ДЛЯ ЗАЯВОК НА ПЕРЕМЕЩЕНИЕ ====================
 
 def create_transfer_request(seller_id: int, product_id: int, quantity: int) -> int:
-    """Создаёт заявку на перемещение и возвращает её ID."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -205,37 +200,88 @@ def update_transfer_request_status(request_id: int, status: str):
             )
             conn.commit()
 
-def create_purchase_request(seller_id: int, product_id: int, quantity: int) -> int:
-    """Создаёт заявку на закупку и возвращает её ID."""
+# ==================== ФУНКЦИИ ДЛЯ РАСЧЁТОВ С ПРОДАВЦАМИ ====================
+
+def get_seller_debt(seller_id: int):
+    """Возвращает текущий долг продавца перед администратором (сумма price_seller проданных товаров - сумма внесённых платежей)."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Сумма всех продаж по цене продавца
+            cur.execute("""
+                SELECT COALESCE(SUM(p.price_seller * (i->>'quantity')::int), 0) as total_sales
+                FROM orders o, jsonb_array_elements(o.items) i
+                JOIN products p ON (i->>'productId')::int = p.id
+                WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
+            """, (seller_id,))
+            total_sales = cur.fetchone()['total_sales']
+
+            # Сумма всех выплат
+            cur.execute("""
+                SELECT COALESCE(SUM(amount), 0) as total_paid
+                FROM seller_payments
+                WHERE seller_id = %s AND status = 'confirmed'
+            """, (seller_id,))
+            total_paid = cur.fetchone()['total_paid']
+
+            debt = total_sales - total_paid
+            return debt, total_sales, total_paid
+
+def get_seller_profit(seller_id: int):
+    """Возвращает чистую прибыль продавца (продажи по цене покупателя - продажи по цене продавца)."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Сумма продаж по цене покупателя
+            cur.execute("""
+                SELECT COALESCE(SUM(p.price * (i->>'quantity')::int), 0) as total_buyer
+                FROM orders o, jsonb_array_elements(o.items) i
+                JOIN products p ON (i->>'productId')::int = p.id
+                WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
+            """, (seller_id,))
+            total_buyer = cur.fetchone()['total_buyer']
+
+            # Сумма продаж по цене продавца
+            cur.execute("""
+                SELECT COALESCE(SUM(p.price_seller * (i->>'quantity')::int), 0) as total_seller
+                FROM orders o, jsonb_array_elements(o.items) i
+                JOIN products p ON (i->>'productId')::int = p.id
+                WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
+            """, (seller_id,))
+            total_seller = cur.fetchone()['total_seller']
+
+            profit = total_buyer - total_seller
+            return profit, total_buyer, total_seller
+
+def create_payment_request(seller_id: int, amount: int):
+    """Создаёт заявку на выплату."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO purchase_requests (seller_id, product_id, quantity, status)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO seller_payments (seller_id, amount, status)
+                VALUES (%s, %s, 'pending')
                 RETURNING id
-            """, (seller_id, product_id, quantity, 'pending'))
-            request_id = cur.fetchone()['id']
+            """, (seller_id, amount))
+            payment_id = cur.fetchone()['id']
             conn.commit()
-            return request_id
+            return payment_id
 
-def get_purchase_request(request_id: int):
+def get_payment_request(payment_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM purchase_requests WHERE id = %s", (request_id,))
+            cur.execute("SELECT * FROM seller_payments WHERE id = %s", (payment_id,))
             return cur.fetchone()
 
-def update_purchase_request_status(request_id: int, status: str, actual_quantity: int = None):
+def update_payment_status(payment_id: int, status: str, confirmed_amount: int = None):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            if actual_quantity is not None:
+            if confirmed_amount is not None:
                 cur.execute(
-                    "UPDATE purchase_requests SET status = %s, processed_at = %s, actual_quantity = %s WHERE id = %s",
-                    (status, datetime.utcnow().isoformat(), actual_quantity, request_id)
+                    "UPDATE seller_payments SET status = %s, confirmed_amount = %s, processed_at = %s WHERE id = %s",
+                    (status, confirmed_amount, datetime.utcnow().isoformat(), payment_id)
                 )
             else:
                 cur.execute(
-                    "UPDATE purchase_requests SET status = %s, processed_at = %s WHERE id = %s",
-                    (status, datetime.utcnow().isoformat(), request_id)
+                    "UPDATE seller_payments SET status = %s, processed_at = %s WHERE id = %s",
+                    (status, datetime.utcnow().isoformat(), payment_id)
                 )
             conn.commit()
 
@@ -245,22 +291,20 @@ def main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add(types.KeyboardButton("📋 Ожидают обработки"))
     keyboard.add(types.KeyboardButton("📦 Мои остатки"), types.KeyboardButton("🔄 Заявка на перемещение"))
+    keyboard.add(types.KeyboardButton("💰 Выплата админу"))
     return keyboard
 
 def format_selected_summary(selected_items, product_names):
-    """Формирует многострочную сводку выбранных товаров."""
     if not selected_items:
         return ""
     lines = []
     for pid, qty in selected_items.items():
         name = product_names.get(pid, f"Товар {pid}")
         lines.append(f"{name} – {qty} упаковок")
-    
     if len(lines) == 1:
         items_lines = lines[0] + "."
     else:
         items_lines = "\n".join([f"{line}," for line in lines[:-1]] + [f"{lines[-1]}."])
-    
     return f"Вы продали:\n{items_lines}\n\nВерно?"
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
@@ -287,7 +331,6 @@ def handle_stock(message):
     if not seller:
         bot.reply_to(message, "❌ У вас нет доступа к этому боту.")
         return
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -298,11 +341,9 @@ def handle_stock(message):
                 ORDER BY p.name
             """, (seller['id'],))
             stocks = cur.fetchall()
-
     if not stocks:
         bot.reply_to(message, "📦 У вас нет товаров на складе.")
         return
-
     lines = []
     for row in stocks:
         if row['quantity'] > 0:
@@ -313,15 +354,6 @@ def handle_stock(message):
             lines.append(f"• {row['name']}: 0 шт")
     bot.reply_to(message, "📦 *Ваши остатки:*\n" + "\n".join(lines), parse_mode='Markdown')
 
-@bot.message_handler(commands=['purchase'])
-def handle_purchase(message):
-    """Команда для администратора: создать заявку на закупку (пополнение хаба)."""
-    user_id = message.from_user.id
-    if user_id != ADMIN_ID:
-        bot.reply_to(message, "❌ У вас нет прав администратора.")
-        return
-    bot.reply_to(message, "🚧 Функция закупки находится в разработке. Будет доступна позже.")
-
 @bot.message_handler(func=lambda m: m.text == "📋 Ожидают обработки")
 def handle_pending_orders(message):
     user_id = message.from_user.id
@@ -329,7 +361,6 @@ def handle_pending_orders(message):
     if not seller:
         bot.reply_to(message, "❌ У вас нет доступа.")
         return
-
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -338,11 +369,9 @@ def handle_pending_orders(message):
                 ORDER BY id DESC
             """, (seller['id'],))
             pending = cur.fetchall()
-
     if not pending:
         bot.reply_to(message, "✅ Нет заказов, ожидающих обработки.")
         return
-
     for order in pending:
         order_number = order['order_number']
         items = order['items']
@@ -370,19 +399,15 @@ def handle_transfer_request_start(message):
     if not seller:
         bot.reply_to(message, "❌ У вас нет доступа.")
         return
-
-    # Показываем список товаров для выбора
     products = get_all_products()
     if not products:
         bot.reply_to(message, "❌ Нет товаров в каталоге.")
         return
-
     markup = types.InlineKeyboardMarkup(row_width=2)
     buttons = []
     for p in products:
         buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"transfer_prod_{p['id']}"))
     markup.add(*buttons)
-
     bot.send_message(
         message.chat.id,
         "🔄 *Создание заявки на перемещение*\n\nВыберите товар, который хотите получить:",
@@ -398,14 +423,11 @@ def transfer_product_selected(call):
     if not seller:
         bot.answer_callback_query(call.id, "❌ Ошибка доступа")
         return
-
-    # Сохраняем в сессии выбранный товар
     edit_sessions[user_id] = {
         'transfer_product_id': product_id,
         'chat_id': call.message.chat.id,
         'message_id': call.message.message_id
     }
-
     bot.edit_message_text(
         f"Введите количество для товара:",
         call.message.chat.id,
@@ -419,7 +441,6 @@ def process_transfer_quantity(message, user_id, product_id):
     if not session:
         bot.reply_to(message, "❌ Сессия истекла. Начните заново.")
         return
-
     try:
         qty = int(message.text.strip())
         if qty <= 0:
@@ -427,16 +448,11 @@ def process_transfer_quantity(message, user_id, product_id):
     except:
         bot.reply_to(message, "❌ Введите положительное целое число.")
         return
-
     seller = get_seller_by_telegram_id(user_id)
     if not seller:
         bot.reply_to(message, "❌ Ошибка доступа.")
         return
-
-    # Создаём заявку
     request_id = create_transfer_request(seller['id'], product_id, qty)
-
-    # Отправляем сообщение кладовщику (хаб)
     hub_seller = get_seller_by_id(HUB_SELLER_ID)
     if hub_seller:
         markup = types.InlineKeyboardMarkup()
@@ -459,18 +475,15 @@ def process_transfer_quantity(message, user_id, product_id):
             logger.info(f"Заявка {request_id} отправлена кладовщику")
         except Exception as e:
             logger.error(f"Ошибка отправки кладовщику: {e}")
-
     bot.reply_to(message, f"✅ Заявка на перемещение создана (№{request_id}). Ожидайте подтверждения.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
 def approve_transfer(call):
     user_id = call.from_user.id
-    # Проверяем, что это кладовщик
     seller = get_seller_by_telegram_id(user_id)
     if not seller or seller['id'] != HUB_SELLER_ID:
         bot.answer_callback_query(call.id, "❌ У вас нет прав для подтверждения.")
         return
-
     request_id = int(call.data.split('_')[2])
     req = get_transfer_request(request_id)
     if not req:
@@ -479,8 +492,6 @@ def approve_transfer(call):
     if req['status'] != 'pending':
         bot.answer_callback_query(call.id, f"✅ Заявка уже {req['status']}")
         return
-
-    # Списываем товар с хаба и добавляем продавцу
     try:
         decrease_seller_stock(
             seller_id=HUB_SELLER_ID,
@@ -500,10 +511,7 @@ def approve_transfer(call):
         logger.error(f"Ошибка при перемещении: {e}")
         bot.answer_callback_query(call.id, "❌ Ошибка при перемещении (возможно, недостаточно товара на хабе).", show_alert=True)
         return
-
     update_transfer_request_status(request_id, 'approved')
-
-    # Уведомляем продавца
     seller_to = get_seller_by_id(req['to_seller_id'])
     if seller_to:
         try:
@@ -517,7 +525,6 @@ def approve_transfer(call):
             )
         except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
-
     bot.edit_message_text(
         f"✅ Заявка {request_id} подтверждена, перемещение выполнено.",
         call.message.chat.id,
@@ -532,7 +539,6 @@ def reject_transfer(call):
     if not seller or seller['id'] != HUB_SELLER_ID:
         bot.answer_callback_query(call.id, "❌ У вас нет прав.")
         return
-
     request_id = int(call.data.split('_')[2])
     req = get_transfer_request(request_id)
     if not req:
@@ -541,10 +547,7 @@ def reject_transfer(call):
     if req['status'] != 'pending':
         bot.answer_callback_query(call.id, f"✅ Заявка уже {req['status']}")
         return
-
     update_transfer_request_status(request_id, 'rejected')
-
-    # Уведомляем продавца
     seller_to = get_seller_by_id(req['to_seller_id'])
     if seller_to:
         try:
@@ -558,7 +561,6 @@ def reject_transfer(call):
             )
         except Exception as e:
             logger.error(f"Ошибка уведомления продавца: {e}")
-
     bot.edit_message_text(
         f"❌ Заявка {request_id} отклонена.",
         call.message.chat.id,
@@ -566,24 +568,582 @@ def reject_transfer(call):
     )
     bot.answer_callback_query(call.id, "✅ Заявка отклонена")
 
-# ==================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (ПОДТВЕРЖДЕНИЕ, РЕДАКТИРОВАНИЕ) ====================
-# Здесь идут уже существующие обработчики confirm_, edit_, select_, conf_, change_, cancel_, finish_, apply_, nochanges_, editagain_, editcancel_
-# Они остаются без изменений (из предыдущей версии). Для краткости я их опускаю, но в полном файле они должны быть.
-# В реальном ответе я вставлю их здесь, но чтобы не дублировать огромный код, скажу, что они остаются теми же.
+# ==================== ОБРАБОТЧИК ВЫПЛАТ ====================
 
-# ... (весь остальной код из предыдущей версии, включая confirm_, edit_ и все связанные обработчики)
+@bot.message_handler(func=lambda m: m.text == "💰 Выплата админу")
+def handle_payment(message):
+    user_id = message.from_user.id
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller:
+        bot.reply_to(message, "❌ У вас нет доступа.")
+        return
+    debt, total_sales, total_paid = get_seller_debt(seller['id'])
+    profit, total_buyer, total_seller = get_seller_profit(seller['id'])
+    msg = (
+        f"💰 *Ваш расчётный счёт*\n\n"
+        f"Вы должны перевести Админу: *{debt} руб.*\n"
+        f"Ваша чистая прибыль за всё время: *{profit} руб.*\n"
+        f"(Продаж на сумму покупателя: {total_buyer} руб., закупочная стоимость: {total_seller} руб.)"
+    )
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("💳 Произвести выплату", callback_data="make_payment"))
+    bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
 
-# ==================== ОБРАБОТЧИК КНОПКИ СОЗДАНИЯ ЗАЯВКИ (из предупреждения) ====================
-
-@bot.callback_query_handler(func=lambda call: call.data == "create_transfer_request")
-def handle_create_transfer_request(call):
-    # Перенаправляем на создание заявки (как при нажатии кнопки "Заявка на перемещение")
+@bot.callback_query_handler(func=lambda call: call.data == "make_payment")
+def make_payment(call):
     user_id = call.from_user.id
     seller = get_seller_by_telegram_id(user_id)
     if not seller:
         bot.answer_callback_query(call.id, "❌ Ошибка доступа")
         return
-    # Запускаем процесс выбора товара (можно вызвать ту же логику, что и при нажатии кнопки)
+    debt, _, _ = get_seller_debt(seller['id'])
+    bot.edit_message_text(
+        f"💳 Ваш долг: *{debt} руб.*\n\nВведите сумму, которую передаёте Админу:",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode='Markdown'
+    )
+    bot.register_next_step_handler_by_chat_id(call.message.chat.id, process_payment_amount, seller['id'], call.message.chat.id)
+    bot.answer_callback_query(call.id)
+
+def process_payment_amount(message, seller_id, original_chat_id):
+    try:
+        amount = int(message.text.strip())
+        if amount <= 0:
+            raise ValueError
+    except:
+        bot.reply_to(message, "❌ Введите положительное целое число.")
+        return
+    payment_id = create_payment_request(seller_id, amount)
+    seller = get_seller_by_id(seller_id)
+    debt, _, _ = get_seller_debt(seller_id)
+    # Отправляем админу
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"payment_confirm_{payment_id}_{amount}"),
+        types.InlineKeyboardButton("✏️ Изменить", callback_data=f"payment_edit_{payment_id}")
+    )
+    try:
+        bot.send_message(
+            ADMIN_ID,
+            f"💸 *Запрос на выплату*\n\n"
+            f"Продавец: {seller['name']}\n"
+            f"Долг: {debt} руб.\n"
+            f"Передаёт: {amount} руб.\n\n"
+            f"Всё верно?",
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки админу: {e}")
+        bot.reply_to(message, "❌ Не удалось уведомить администратора.")
+        return
+    bot.reply_to(message, f"✅ Запрос на выплату {amount} руб. отправлен администратору. Ожидайте подтверждения.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('payment_confirm_'))
+def payment_confirm(call):
+    user_id = call.from_user.id
+    if user_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ У вас нет прав.")
+        return
+    parts = call.data.split('_')
+    payment_id = int(parts[2])
+    amount = int(parts[3])
+    payment = get_payment_request(payment_id)
+    if not payment:
+        bot.answer_callback_query(call.id, "❌ Заявка не найдена")
+        return
+    if payment['status'] != 'pending':
+        bot.answer_callback_query(call.id, f"✅ Заявка уже {payment['status']}")
+        return
+    # Подтверждаем
+    update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
+    # Уведомляем продавца
+    seller = get_seller_by_id(payment['seller_id'])
+    if seller:
+        debt, _, _ = get_seller_debt(payment['seller_id'])
+        try:
+            bot.send_message(
+                seller['telegram_id'],
+                f"✅ Админ подтвердил получение *{amount} руб.*\n"
+                f"Ваш долг составляет *{debt} руб.*",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка уведомления продавца: {e}")
+    bot.edit_message_text(
+        f"✅ Вы подтвердили получение {amount} руб. от продавца.",
+        call.message.chat.id,
+        call.message.message_id
+    )
+    bot.answer_callback_query(call.id, "✅ Подтверждено")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('payment_edit_'))
+def payment_edit(call):
+    user_id = call.from_user.id
+    if user_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ У вас нет прав.")
+        return
+    payment_id = int(call.data.split('_')[2])
+    payment = get_payment_request(payment_id)
+    if not payment:
+        bot.answer_callback_query(call.id, "❌ Заявка не найдена")
+        return
+    if payment['status'] != 'pending':
+        bot.answer_callback_query(call.id, f"✅ Заявка уже {payment['status']}")
+        return
+    bot.edit_message_text(
+        f"✏️ Введите сумму, которую вы реально получили:",
+        call.message.chat.id,
+        call.message.message_id
+    )
+    bot.register_next_step_handler_by_chat_id(call.message.chat.id, process_edit_payment, payment_id, call.message.chat.id)
+    bot.answer_callback_query(call.id)
+
+def process_edit_payment(message, payment_id, original_chat_id):
+    try:
+        amount = int(message.text.strip())
+        if amount <= 0:
+            raise ValueError
+    except:
+        bot.reply_to(message, "❌ Введите положительное целое число.")
+        return
+    payment = get_payment_request(payment_id)
+    if not payment:
+        bot.reply_to(message, "❌ Заявка не найдена")
+        return
+    # Обновляем сумму
+    update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
+    seller = get_seller_by_id(payment['seller_id'])
+    if seller:
+        debt, _, _ = get_seller_debt(payment['seller_id'])
+        try:
+            bot.send_message(
+                seller['telegram_id'],
+                f"✅ Админ подтвердил получение *{amount} руб.*\n"
+                f"Ваш долг составляет *{debt} руб.*",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка уведомления продавца: {e}")
+    bot.reply_to(message, f"✅ Вы подтвердили получение {amount} руб. от продавца.")
+
+# ==================== ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ И РЕДАКТИРОВАНИЯ ЗАКАЗОВ ====================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_'))
+def handle_confirm(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"✅ Нажата кнопка подтверждения заказа {order_num}")
+
+    order = get_order_by_number(order_num)
+    if not order:
+        bot.answer_callback_query(call.id, "❌ Заказ не найден")
+        return
+
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller or order['seller_id'] != seller['id']:
+        bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
+        return
+
+    if order.get('stock_processed'):
+        bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
+        return
+
+    # Списываем товары
+    for item in order['items']:
+        decrease_seller_stock(
+            seller_id=seller['id'],
+            product_id=item['productId'],
+            quantity=item['quantity'],
+            reason='sale',
+            order_id=order['id']
+        )
+
+    mark_order_as_processed(order['id'])
+
+    bot.answer_callback_query(call.id, "✅ Продажа зафиксирована")
+    bot.edit_message_text(
+        f"✅ Заказ {order_num} проведён.",
+        call.message.chat.id,
+        call.message.message_id
+    )
+
+    # Проверяем отрицательные остатки и отправляем предупреждение
+    send_negative_stock_warning(call.message.chat.id, seller['id'])
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('edit_'))
+def handle_edit(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"✏️ Нажата кнопка редактирования заказа {order_num}")
+
+    order = get_order_by_number(order_num)
+    if not order:
+        bot.answer_callback_query(call.id, "❌ Заказ не найден")
+        return
+
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller or order['seller_id'] != seller['id']:
+        bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
+        return
+
+    if order.get('stock_processed'):
+        bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
+        return
+
+    products = get_all_products()
+    if not products:
+        bot.answer_callback_query(call.id, "❌ Нет товаров в каталоге")
+        return
+
+    edit_sessions[user_id] = {
+        'order_number': order_num,
+        'original_items': {item['productId']: item['quantity'] for item in order['items']},
+        'selected_items': {},
+        'message_id': call.message.message_id,
+        'chat_id': call.message.chat.id
+    }
+    logger.info(f"✅ Сессия редактирования создана для заказа {order_num}")
+
+    show_product_selection(user_id)
+
+def show_product_selection(user_id):
+    session = edit_sessions.get(user_id)
+    if not session:
+        return
+
+    products = get_all_products()
+    product_names = {p['id']: p['name'] for p in products}
+    summary = format_selected_summary(session['selected_items'], product_names)
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    for p in products:
+        buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"selprod_{session['order_number']}_{p['id']}"))
+    markup.add(*buttons)
+    markup.row(types.InlineKeyboardButton("✅ Завершить", callback_data=f"finish_{session['order_number']}"))
+
+    text = f"✏️ *Редактирование заказа {session['order_number']}*\n\n"
+    if summary:
+        text += summary + "\n\n"
+    text += "Выберите товар, чтобы указать проданное количество:"
+
+    bot.edit_message_text(
+        text,
+        session['chat_id'],
+        session['message_id'],
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
+    logger.info(f"Показано меню выбора товара для заказа {session['order_number']}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('selprod_'))
+def select_product(call):
+    user_id = call.from_user.id
+    parts = call.data.split('_')
+    order_num = parts[1]
+    product_id = int(parts[2])
+    logger.info(f"🔘 Выбран товар {product_id} для заказа {order_num}")
+
+    session = edit_sessions.get(user_id)
+    if not session or session['order_number'] != order_num:
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
+        return
+
+    products = get_all_products()
+    product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+
+    bot.edit_message_text(
+        f"Введите количество для товара *{product_name}*:",
+        session['chat_id'],
+        session['message_id'],
+        parse_mode='Markdown'
+    )
+    bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id)
+    bot.answer_callback_query(call.id)
+
+def process_quantity_input(message, user_id, order_num, product_id):
+    logger.info(f"📝 Ввод количества для товара {product_id}, заказ {order_num}")
+    session = edit_sessions.get(user_id)
+    if not session or session['order_number'] != order_num:
+        bot.reply_to(message, "❌ Сессия редактирования истекла. Начните заново.")
+        return
+
+    try:
+        qty = int(message.text.strip())
+        if qty < 0:
+            raise ValueError
+    except:
+        bot.reply_to(message, "❌ Введите целое неотрицательное число.")
+        show_product_selection(user_id)
+        return
+
+    session['selected_items'][product_id] = qty
+    logger.info(f"✅ Количество для товара {product_id} установлено: {qty}")
+
+    products = get_all_products()
+    product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"conf_{order_num}_{product_id}"),
+        types.InlineKeyboardButton("✏️ Изменить", callback_data=f"change_{order_num}_{product_id}"),
+        types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_num}")
+    )
+    bot.send_message(
+        session['chat_id'],
+        f"*Заказ {order_num}*\nВы продали *{product_name}* – *{qty}* упаковок, верно?",
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('conf_'))
+def confirm_item(call):
+    user_id = call.from_user.id
+    parts = call.data.split('_')
+    order_num = parts[1]
+    product_id = int(parts[2])
+    logger.info(f"✅ Подтверждён товар {product_id} для заказа {order_num}")
+
+    session = edit_sessions.get(user_id)
+    if not session or session['order_number'] != order_num:
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
+        return
+
+    bot.delete_message(session['chat_id'], call.message.message_id)
+    show_product_selection(user_id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('change_'))
+def change_item(call):
+    user_id = call.from_user.id
+    parts = call.data.split('_')
+    order_num = parts[1]
+    product_id = int(parts[2])
+    logger.info(f"✏️ Изменение товара {product_id} для заказа {order_num}")
+
+    session = edit_sessions.get(user_id)
+    if not session or session['order_number'] != order_num:
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
+        return
+
+    bot.delete_message(session['chat_id'], call.message.message_id)
+    products = get_all_products()
+    product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+    bot.send_message(
+        session['chat_id'],
+        f"Введите новое количество для товара *{product_name}*:",
+        parse_mode='Markdown'
+    )
+    bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
+def cancel_item(call):
+    user_id = call.from_user.id
+    parts = call.data.split('_')
+    order_num = parts[1]
+    logger.info(f"❌ Отмена выбора товара для заказа {order_num}")
+
+    session = edit_sessions.get(user_id)
+    if session and session['order_number'] == order_num:
+        bot.delete_message(session['chat_id'], call.message.message_id)
+        show_product_selection(user_id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('finish_'))
+def finish_edit(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"🏁 Завершение редактирования заказа {order_num}")
+
+    session = edit_sessions.get(user_id)
+    if not session or session['order_number'] != order_num:
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
+        return
+
+    if not session['selected_items']:
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ Без изменений", callback_data=f"nochanges_{order_num}"),
+            types.InlineKeyboardButton("❌ Отмена", callback_data=f"editcancel_{order_num}")
+        )
+        bot.edit_message_text(
+            f"*Заказ {order_num}*\n\nВы не добавили ни одного товара. Подтвердить заказ без изменений?",
+            session['chat_id'],
+            session['message_id'],
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        return
+
+    products = get_all_products()
+    product_names = {p['id']: p['name'] for p in products}
+    lines = []
+    for pid, qty in session['selected_items'].items():
+        name = product_names.get(pid, f"Товар {pid}")
+        lines.append(f"• {name}: {qty} упаковок")
+    summary = "\n".join(lines)
+
+    markup = types.InlineKeyboardMarkup()
+    markup.row(
+        types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"apply_{order_num}"),
+        types.InlineKeyboardButton("✏️ Изменить", callback_data=f"editagain_{order_num}"),
+        types.InlineKeyboardButton("❌ Отмена", callback_data=f"editcancel_{order_num}")
+    )
+    bot.edit_message_text(
+        f"*Заказ {order_num}*\n\n"
+        f"*Вы продали:*\n{summary}\n\n"
+        "Всё верно?",
+        session['chat_id'],
+        session['message_id'],
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('apply_'))
+def apply_edit(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"✅ Применение изменений для заказа {order_num}")
+
+    session = edit_sessions.pop(user_id, None)
+    if not session or session['order_number'] != order_num:
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
+        return
+
+    order = get_order_by_number(order_num)
+    if not order:
+        logger.error(f"apply_edit: заказ {order_num} не найден в базе")
+        bot.answer_callback_query(call.id, "❌ Заказ не найден")
+        return
+
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller or order['seller_id'] != seller['id']:
+        bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
+        return
+
+    if order.get('stock_processed'):
+        bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
+        return
+
+    selected = session['selected_items']
+    if not selected:
+        bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
+        return
+
+    # Списываем
+    for product_id, qty in selected.items():
+        if qty > 0:
+            decrease_seller_stock(
+                seller_id=seller['id'],
+                product_id=product_id,
+                quantity=qty,
+                reason='sale',
+                order_id=order['id']
+            )
+            logger.info(f"✅ Списано {qty} ед. товара {product_id}")
+
+    mark_order_as_processed(order['id'])
+    logger.info(f"✅ Заказ {order_num} обработан, списано товаров: {len(selected)}")
+
+    bot.edit_message_text(
+        f"✅ Заказ {order_num} обработан.",
+        session['chat_id'],
+        session['message_id']
+    )
+
+    # Проверяем отрицательные остатки и отправляем предупреждение
+    send_negative_stock_warning(session['chat_id'], seller['id'])
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('nochanges_'))
+def no_changes(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"✅ Подтверждение заказа {order_num} без изменений")
+
+    session = edit_sessions.pop(user_id, None)
+    if not session or session['order_number'] != order_num:
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
+        return
+
+    order = get_order_by_number(order_num)
+    if not order:
+        bot.answer_callback_query(call.id, "❌ Заказ не найден")
+        return
+
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller or order['seller_id'] != seller['id']:
+        bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
+        return
+
+    if order.get('stock_processed'):
+        bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
+        return
+
+    # Списываем исходные количества
+    for item in order['items']:
+        decrease_seller_stock(
+            seller_id=seller['id'],
+            product_id=item['productId'],
+            quantity=item['quantity'],
+            reason='sale',
+            order_id=order['id']
+        )
+
+    mark_order_as_processed(order['id'])
+
+    bot.edit_message_text(
+        f"✅ Заказ {order_num} проведён без изменений.",
+        session['chat_id'],
+        session['message_id']
+    )
+
+    # Проверяем отрицательные остатки и отправляем предупреждение
+    send_negative_stock_warning(session['chat_id'], seller['id'])
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('editagain_'))
+def edit_again(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"✏️ Повторное редактирование заказа {order_num}")
+
+    session = edit_sessions.get(user_id)
+    if not session or session['order_number'] != order_num:
+        bot.answer_callback_query(call.id, "❌ Сессия истекла")
+        return
+
+    session['selected_items'] = {}
+    show_product_selection(user_id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('editcancel_'))
+def edit_cancel(call):
+    user_id = call.from_user.id
+    order_num = call.data.split('_')[1]
+    logger.info(f"❌ Отмена редактирования заказа {order_num}")
+
+    session = edit_sessions.pop(user_id, None)
+    if session and session['order_number'] == order_num:
+        bot.edit_message_text(
+            "❌ Редактирование отменено.",
+            session['chat_id'],
+            session['message_id']
+        )
+    bot.answer_callback_query(call.id)
+
+# ==================== ОБРАБОТЧИК КНОПКИ СОЗДАНИЯ ЗАЯВКИ (из предупреждения) ====================
+
+@bot.callback_query_handler(func=lambda call: call.data == "create_transfer_request")
+def handle_create_transfer_request(call):
+    user_id = call.from_user.id
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller:
+        bot.answer_callback_query(call.id, "❌ Ошибка доступа")
+        return
     products = get_all_products()
     if not products:
         bot.answer_callback_query(call.id, "❌ Нет товаров в каталоге.")
@@ -610,15 +1170,12 @@ def order_completed():
         data = request.get_json()
         if not data or 'order_number' not in data:
             return jsonify({'error': 'Missing order_number'}), 400
-
         order_number = data['order_number']
         order = get_order_by_number(order_number)
         if not order:
             return jsonify({'error': 'Order not found'}), 404
-
         if order.get('stock_processed'):
             return jsonify({'status': 'already_processed'}), 200
-
         seller_id = order['seller_id']
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -627,7 +1184,6 @@ def order_completed():
                 if not seller:
                     return jsonify({'error': 'Seller not found'}), 404
                 seller_tg = seller['telegram_id']
-
         items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in order['items']])
         markup = types.InlineKeyboardMarkup()
         markup.row(
@@ -647,9 +1203,7 @@ def order_completed():
         except Exception as e:
             logger.error(f"Ошибка отправки продавцу: {e}")
             return jsonify({'error': 'Failed to notify seller'}), 500
-
         return jsonify({'status': 'ok'})
-
     except Exception as e:
         logger.exception("Ошибка в /api/order-completed")
         return jsonify({'error': str(e)}), 500
