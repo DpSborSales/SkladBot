@@ -30,6 +30,8 @@ WEBHOOK_URL = f"{BASE_URL}/webhook"
 # Хранилище сессий редактирования
 edit_sessions = {}
 
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
 def parse_contact(contact_json):
     if isinstance(contact_json, dict):
         return contact_json
@@ -81,15 +83,66 @@ def mark_order_as_processed(order_id: int):
             cur.execute("UPDATE orders SET stock_processed = TRUE WHERE id = %s", (order_id,))
             conn.commit()
 
-def update_product_stock(product_id: int, change: int, reason: str, order_id: int = None, seller_id: int = None):
+# ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С ОСТАТКАМИ ====================
+
+def get_seller_stock(seller_id: int, product_id: int) -> int:
+    """Возвращает текущее количество товара у продавца."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE products SET stock = stock + %s WHERE id = %s", (change, product_id))
+            cur.execute(
+                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s",
+                (seller_id, product_id)
+            )
+            result = cur.fetchone()
+            return result['quantity'] if result else 0
+
+def decrease_seller_stock(seller_id: int, product_id: int, quantity: int, reason: str, order_id: int = None):
+    """Уменьшает остаток товара у продавца на quantity и записывает движение."""
+    if quantity <= 0:
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Проверяем, что достаточно
+            cur.execute(
+                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s",
+                (seller_id, product_id)
+            )
+            row = cur.fetchone()
+            if not row or row['quantity'] < quantity:
+                raise ValueError(f"Недостаточно товара (id {product_id}) у продавца {seller_id}")
+            # Уменьшаем остаток
+            cur.execute(
+                "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND product_id = %s",
+                (quantity, seller_id, product_id)
+            )
+            # Записываем движение
             cur.execute("""
                 INSERT INTO stock_movements (product_id, quantity_change, reason, order_id, seller_id)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (product_id, change, reason, order_id, seller_id))
+            """, (product_id, -quantity, reason, order_id, seller_id))
             conn.commit()
+
+def increase_seller_stock(seller_id: int, product_id: int, quantity: int, reason: str, order_id: int = None):
+    """Увеличивает остаток товара у продавца на quantity и записывает движение."""
+    if quantity <= 0:
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Увеличиваем остаток (upsert)
+            cur.execute("""
+                INSERT INTO seller_stock (seller_id, product_id, quantity)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (seller_id, product_id)
+                DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
+            """, (seller_id, product_id, quantity))
+            # Записываем движение
+            cur.execute("""
+                INSERT INTO stock_movements (product_id, quantity_change, reason, order_id, seller_id)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (product_id, quantity, reason, order_id, seller_id))
+            conn.commit()
+
+# ==================== КЛАВИАТУРЫ И ФОРМАТИРОВАНИЕ ====================
 
 def main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -112,6 +165,8 @@ def format_selected_summary(selected_items, product_names):
     
     return f"Вы продали:\n{items_lines}\n\nВерно?"
 
+# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     user_id = message.from_user.id
@@ -126,6 +181,32 @@ def handle_start(message):
         "Используйте кнопку ниже, чтобы посмотреть заказы, ожидающие обработки.",
         reply_markup=main_keyboard()
     )
+
+@bot.message_handler(commands=['stock'])
+def handle_stock(message):
+    user_id = message.from_user.id
+    seller = get_seller_by_telegram_id(user_id)
+    if not seller:
+        bot.reply_to(message, "❌ У вас нет доступа к этому боту.")
+        return
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT p.name, ss.quantity
+                FROM seller_stock ss
+                JOIN products p ON ss.product_id = p.id
+                WHERE ss.seller_id = %s AND ss.quantity > 0
+                ORDER BY p.name
+            """, (seller['id'],))
+            stocks = cur.fetchall()
+
+    if not stocks:
+        bot.reply_to(message, "📦 У вас нет товаров на складе.")
+        return
+
+    lines = [f"• {row['name']}: {row['quantity']} шт" for row in stocks]
+    bot.reply_to(message, "📦 *Ваши остатки:*\n" + "\n".join(lines), parse_mode='Markdown')
 
 @bot.message_handler(func=lambda m: m.text == "📋 Ожидают обработки")
 def handle_pending_orders(message):
@@ -164,6 +245,8 @@ def handle_pending_orders(message):
             reply_markup=markup
         )
 
+# ==================== ПОДТВЕРЖДЕНИЕ БЕЗ РЕДАКТИРОВАНИЯ ====================
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_'))
 def handle_confirm(call):
     user_id = call.from_user.id
@@ -184,13 +267,25 @@ def handle_confirm(call):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
+    # Проверяем наличие достаточного количества товара у продавца
+    insufficient = []
     for item in order['items']:
-        update_product_stock(
+        available = get_seller_stock(seller['id'], item['productId'])
+        if available < item['quantity']:
+            insufficient.append(f"{item['name']}: нужно {item['quantity']}, доступно {available}")
+    if insufficient:
+        msg = "❌ Недостаточно товара для подтверждения заказа:\n" + "\n".join(insufficient)
+        bot.answer_callback_query(call.id, msg, show_alert=True)
+        return
+
+    # Списываем товары
+    for item in order['items']:
+        decrease_seller_stock(
+            seller_id=seller['id'],
             product_id=item['productId'],
-            change=-item['quantity'],
+            quantity=item['quantity'],
             reason='sale',
-            order_id=order['id'],
-            seller_id=seller['id']
+            order_id=order['id']
         )
 
     mark_order_as_processed(order['id'])
@@ -462,20 +557,36 @@ def apply_edit(call):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
-    # Списываем только те товары, которые продавец выбрал в процессе редактирования
     selected = session['selected_items']
     if not selected:
         bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
         return
 
+    # Проверяем наличие
+    insufficient = []
+    for product_id, qty in selected.items():
+        if qty <= 0:
+            continue
+        available = get_seller_stock(seller['id'], product_id)
+        if available < qty:
+            # Найдём название товара
+            products = get_all_products()
+            name = next((p['name'] for p in products if p['id'] == product_id), f"Товар {product_id}")
+            insufficient.append(f"{name}: нужно {qty}, доступно {available}")
+    if insufficient:
+        msg = "❌ Недостаточно товара для подтверждения:\n" + "\n".join(insufficient)
+        bot.answer_callback_query(call.id, msg, show_alert=True)
+        return
+
+    # Списываем
     for product_id, qty in selected.items():
         if qty > 0:
-            update_product_stock(
+            decrease_seller_stock(
+                seller_id=seller['id'],
                 product_id=product_id,
-                change=-qty,
+                quantity=qty,
                 reason='sale',
-                order_id=order['id'],
-                seller_id=seller['id']
+                order_id=order['id']
             )
             logger.info(f"✅ Списано {qty} ед. товара {product_id}")
 
@@ -514,13 +625,25 @@ def no_changes(call):
         bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
         return
 
+    # Проверяем наличие исходных позиций
+    insufficient = []
     for item in order['items']:
-        update_product_stock(
+        available = get_seller_stock(seller['id'], item['productId'])
+        if available < item['quantity']:
+            insufficient.append(f"{item['name']}: нужно {item['quantity']}, доступно {available}")
+    if insufficient:
+        msg = "❌ Недостаточно товара для подтверждения:\n" + "\n".join(insufficient)
+        bot.answer_callback_query(call.id, msg, show_alert=True)
+        return
+
+    # Списываем исходные количества
+    for item in order['items']:
+        decrease_seller_stock(
+            seller_id=seller['id'],
             product_id=item['productId'],
-            change=-item['quantity'],
+            quantity=item['quantity'],
             reason='sale',
-            order_id=order['id'],
-            seller_id=seller['id']
+            order_id=order['id']
         )
 
     mark_order_as_processed(order['id'])
@@ -562,7 +685,7 @@ def edit_cancel(call):
         )
     bot.answer_callback_query(call.id)
 
-# ==================== ЭНДПОИНТ ====================
+# ==================== ЭНДПОИНТ ДЛЯ УВЕДОМЛЕНИЙ ИЗ ОСНОВНОГО БОТА ====================
 
 @app.route('/api/order-completed', methods=['POST'])
 def order_completed():
@@ -613,6 +736,8 @@ def order_completed():
     except Exception as e:
         logger.exception("Ошибка в /api/order-completed")
         return jsonify({'error': str(e)}), 500
+
+# ==================== ВЕБХУК И ЗАПУСК ====================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
