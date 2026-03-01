@@ -1,11 +1,11 @@
-# handlers/edit_order.py
 import logging
 from telebot import types
 from models import (
     get_order_by_number, get_seller_by_telegram_id, get_all_products,
     get_seller_stock, decrease_seller_stock, mark_order_as_processed,
-    get_negative_stock_summary, send_negative_stock_warning
+    get_negative_stock_summary
 )
+from notifications import send_negative_stock_warning
 from keyboards import main_keyboard
 from utils import format_selected_summary
 
