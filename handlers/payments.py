@@ -42,7 +42,6 @@ def register_payment_handlers(bot):
                 logger.info("✅ Сообщение о выплате отправлено")
             except Exception as e:
                 logger.error(f"Ошибка отправки с Markdown: {e}")
-                # Отправляем без Markdown, если возникла ошибка
                 bot.send_message(message.chat.id, msg.replace('*', ''), reply_markup=markup)
                 logger.info("✅ Сообщение отправлено без Markdown")
         except Exception as e:
@@ -107,36 +106,47 @@ def register_payment_handlers(bot):
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('payment_confirm_'))
     def payment_confirm(call):
+        logger.info(f"✅ Вызван payment_confirm с data={call.data}")
         user_id = call.from_user.id
-        logger.info(f"✅ Админ подтверждает выплату, пользователь {user_id}")
         if user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
         parts = call.data.split('_')
+        if len(parts) < 4:
+            logger.error(f"Неверный формат callback: {call.data}")
+            bot.answer_callback_query(call.id, "❌ Ошибка данных")
+            return
         payment_id = int(parts[2])
         amount = int(parts[3])
         payment = get_payment_request(payment_id)
         if not payment:
+            logger.error(f"Заявка {payment_id} не найдена")
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
         if payment['status'] != 'pending':
+            logger.info(f"Заявка уже {payment['status']}")
             bot.answer_callback_query(call.id, f"✅ Заявка уже {payment['status']}")
             return
-        update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
-        logger.info(f"Выплата {payment_id} подтверждена, сумма {amount}")
-        seller = get_seller_by_id(payment['seller_id'])
-        if seller:
-            debt, _, _ = get_seller_debt(payment['seller_id'])
-            try:
-                bot.send_message(
-                    seller['telegram_id'],
-                    f"✅ Админ подтвердил получение *{amount} руб.*\n"
-                    f"Ваш долг составляет *{debt} руб.*",
-                    parse_mode='Markdown'
-                )
-                logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}")
-            except Exception as e:
-                logger.error(f"Ошибка уведомления продавца: {e}")
+        try:
+            update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
+            logger.info(f"Выплата {payment_id} подтверждена, сумма {amount}")
+            seller = get_seller_by_id(payment['seller_id'])
+            if seller:
+                debt, _, _ = get_seller_debt(payment['seller_id'])
+                try:
+                    bot.send_message(
+                        seller['telegram_id'],
+                        f"✅ Админ подтвердил получение *{amount} руб.*\n"
+                        f"Ваш долг составляет *{debt} руб.*",
+                        parse_mode='Markdown'
+                    )
+                    logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}")
+                except Exception as e:
+                    logger.error(f"Ошибка уведомления продавца: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка при подтверждении выплаты: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка базы данных", show_alert=True)
+            return
         bot.edit_message_text(
             f"✅ Вы подтвердили получение {amount} руб. от продавца.",
             call.message.chat.id,
@@ -146,17 +156,24 @@ def register_payment_handlers(bot):
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('payment_edit_'))
     def payment_edit(call):
+        logger.info(f"✏️ Вызван payment_edit с data={call.data}")
         user_id = call.from_user.id
-        logger.info(f"✏️ Админ редактирует выплату, пользователь {user_id}")
         if user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
-        payment_id = int(call.data.split('_')[2])
+        parts = call.data.split('_')
+        if len(parts) < 3:
+            logger.error(f"Неверный формат callback: {call.data}")
+            bot.answer_callback_query(call.id, "❌ Ошибка данных")
+            return
+        payment_id = int(parts[2])
         payment = get_payment_request(payment_id)
         if not payment:
+            logger.error(f"Заявка {payment_id} не найдена")
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
         if payment['status'] != 'pending':
+            logger.info(f"Заявка уже {payment['status']}")
             bot.answer_callback_query(call.id, f"✅ Заявка уже {payment['status']}")
             return
         bot.edit_message_text(
@@ -181,18 +198,23 @@ def register_payment_handlers(bot):
         if not payment:
             bot.reply_to(message, "❌ Заявка не найдена")
             return
-        update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
-        logger.info(f"Выплата {payment_id} подтверждена с изменённой суммой {amount}")
-        seller = get_seller_by_id(payment['seller_id'])
-        if seller:
-            debt, _, _ = get_seller_debt(payment['seller_id'])
-            try:
-                bot.send_message(
-                    seller['telegram_id'],
-                    f"✅ Админ подтвердил получение *{amount} руб.*\n"
-                    f"Ваш долг составляет *{debt} руб.*",
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Ошибка уведомления продавца: {e}")
+        try:
+            update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
+            logger.info(f"Выплата {payment_id} подтверждена с изменённой суммой {amount}")
+            seller = get_seller_by_id(payment['seller_id'])
+            if seller:
+                debt, _, _ = get_seller_debt(payment['seller_id'])
+                try:
+                    bot.send_message(
+                        seller['telegram_id'],
+                        f"✅ Админ подтвердил получение *{amount} руб.*\n"
+                        f"Ваш долг составляет *{debt} руб.*",
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка уведомления продавца: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка при подтверждении выплаты: {e}")
+            bot.reply_to(message, "❌ Ошибка базы данных")
+            return
         bot.reply_to(message, f"✅ Вы подтвердили получение {amount} руб. от продавца.")
