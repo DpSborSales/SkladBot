@@ -1,13 +1,14 @@
+# handlers/common.py
 import logging
 from telebot import types
 from models import (
-    get_seller_by_telegram_id, get_all_products, get_order_by_number,
-    get_seller_stock, decrease_seller_stock, mark_order_as_processed,
+    get_seller_by_telegram_id, get_all_products, get_seller_stock,
+    get_order_by_number, decrease_seller_stock, mark_order_as_processed,
     get_negative_stock_summary
 )
 from keyboards import main_keyboard
-import models
-import utils
+from notifications import send_negative_stock_warning
+from database import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -93,4 +94,7 @@ def register_common_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "📦 Мои остатки")
     def handle_my_stock(message):
+        # Переиспользуем команду /stock
         handle_stock(message)
+
+    # Здесь могут быть другие общие обработчики, например, для команды /help
