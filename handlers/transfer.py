@@ -1,3 +1,4 @@
+# handlers/transfer.py
 import logging
 from telebot import types
 from models import (
@@ -9,7 +10,6 @@ from config import HUB_SELLER_ID
 
 logger = logging.getLogger(__name__)
 
-# Сессии для создания заявок (можно использовать общий словарь, но лучше локальный)
 transfer_sessions = {}
 
 def register_transfer_handlers(bot):
@@ -188,3 +188,30 @@ def register_transfer_handlers(bot):
             call.message.message_id
         )
         bot.answer_callback_query(call.id, "✅ Заявка отклонена")
+
+    # Обработчик инлайн-кнопки из предупреждения о минусах
+    @bot.callback_query_handler(func=lambda call: call.data == "create_transfer_request")
+    def handle_create_transfer_request(call):
+        user_id = call.from_user.id
+        seller = get_seller_by_telegram_id(user_id)
+        if not seller:
+            bot.answer_callback_query(call.id, "❌ Ошибка доступа")
+            return
+        # Запускаем процесс создания заявки (выбор товара)
+        products = get_all_products()
+        if not products:
+            bot.answer_callback_query(call.id, "❌ Нет товаров в каталоге.")
+            return
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        buttons = []
+        for p in products:
+            buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"transfer_prod_{p['id']}"))
+        markup.add(*buttons)
+        bot.edit_message_text(
+            "🔄 *Создание заявки на перемещение*\n\nВыберите товар, который хотите получить:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
