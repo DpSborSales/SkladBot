@@ -20,6 +20,17 @@ def register_transfer_handlers(bot):
         if not seller:
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
+
+        # Если это кладовщик – показываем заглушку
+        if seller['id'] == HUB_SELLER_ID:
+            bot.reply_to(
+                message,
+                "ℹ️ Управление заявками на перемещение осуществляется через раздел «Ожидают обработки».\n\n"
+                "Здесь вы можете подтверждать или отклонять заявки от продавцов."
+            )
+            return
+
+        # Обычный продавец – создание заявки
         products = get_all_products()
         if not products:
             bot.reply_to(message, "❌ Нет товаров в каталоге.")
@@ -41,7 +52,7 @@ def register_transfer_handlers(bot):
         user_id = call.from_user.id
         product_id = int(call.data.split('_')[2])
         seller = get_seller_by_telegram_id(user_id)
-        if not seller:
+        if not seller or seller['id'] == HUB_SELLER_ID:
             bot.answer_callback_query(call.id, "❌ Ошибка доступа")
             return
         transfer_sessions[user_id] = {
@@ -70,7 +81,7 @@ def register_transfer_handlers(bot):
             bot.reply_to(message, "❌ Введите положительное целое число.")
             return
         seller = get_seller_by_telegram_id(user_id)
-        if not seller:
+        if not seller or seller['id'] == HUB_SELLER_ID:
             bot.reply_to(message, "❌ Ошибка доступа.")
             return
         request_id = create_transfer_request(seller['id'], product_id, qty)
@@ -189,12 +200,12 @@ def register_transfer_handlers(bot):
         )
         bot.answer_callback_query(call.id, "✅ Заявка отклонена")
 
-    # Обработчик инлайн-кнопки из предупреждения о минусах
+    # Обработчик инлайн-кнопки из предупреждения о минусах (оставляем как есть)
     @bot.callback_query_handler(func=lambda call: call.data == "create_transfer_request")
     def handle_create_transfer_request(call):
         user_id = call.from_user.id
         seller = get_seller_by_telegram_id(user_id)
-        if not seller:
+        if not seller or seller['id'] == HUB_SELLER_ID:
             bot.answer_callback_query(call.id, "❌ Ошибка доступа")
             return
         # Запускаем процесс создания заявки (выбор товара)
