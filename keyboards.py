@@ -6,3 +6,11 @@ def main_keyboard():
     keyboard.add(types.KeyboardButton("📦 Мои остатки"), types.KeyboardButton("🔄 Заявка на перемещение"))
     keyboard.add(types.KeyboardButton("💰 Выплата админу"))
     return keyboard
+
+def admin_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton("⏳ Ожидают обработки"))
+    keyboard.add(types.KeyboardButton("📦 Остатки"), types.KeyboardButton("💰 Выплаты"))
+    keyboard.add(types.KeyboardButton("📦 Закуп товаров"))
+    keyboard.add(types.KeyboardButton("🔙 Назад в общее меню"))
+    return keyboard
