@@ -14,15 +14,20 @@ logger = logging.getLogger(__name__)
 payment_sessions = {}
 
 def register_payment_handlers(bot):
+    logger.info("💰 Регистрация обработчиков выплат")
+
     @bot.message_handler(func=lambda m: m.text == "💰 Выплата админу")
     def handle_payment(message):
         user_id = message.from_user.id
+        logger.info(f"💰 Нажата кнопка 'Выплата админу' пользователем {user_id}")
         seller = get_seller_by_telegram_id(user_id)
         if not seller:
+            logger.warning(f"❌ Пользователь {user_id} не является продавцом")
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
-        debt, _, _ = get_seller_debt(seller['id'])
-        profit, _, _ = get_seller_profit(seller['id'])
+        debt, total_sales, total_paid = get_seller_debt(seller['id'])
+        profit, total_buyer, total_seller = get_seller_profit(seller['id'])
+        logger.info(f"Долг продавца {seller['id']}: {debt}, прибыль: {profit}")
         msg = (
             f"💰 *Ваш расчётный счёт*\n\n"
             f"Вы должны перевести Админу: *{debt} руб.*\n"
@@ -36,11 +41,13 @@ def register_payment_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "make_payment")
     def make_payment(call):
         user_id = call.from_user.id
+        logger.info(f"💳 Нажата кнопка 'Произвести выплату' пользователем {user_id}")
         seller = get_seller_by_telegram_id(user_id)
         if not seller:
             bot.answer_callback_query(call.id, "❌ Ошибка доступа")
             return
         debt, _, _ = get_seller_debt(seller['id'])
+        logger.info(f"Долг продавца {seller['id']}: {debt}")
         bot.edit_message_text(
             f"💳 Ваш долг: *{debt} руб.*\n\nВведите сумму, которую передаёте Админу:",
             call.message.chat.id,
@@ -51,6 +58,8 @@ def register_payment_handlers(bot):
         bot.answer_callback_query(call.id)
 
     def process_payment_amount(message, seller_id, original_chat_id):
+        user_id = message.from_user.id
+        logger.info(f"💵 Ввод суммы выплаты пользователем {user_id}")
         try:
             amount = int(message.text.strip())
             if amount <= 0:
@@ -61,6 +70,7 @@ def register_payment_handlers(bot):
         payment_id = create_payment_request(seller_id, amount)
         seller = get_seller_by_id(seller_id)
         debt, _, _ = get_seller_debt(seller_id)
+        logger.info(f"Создана заявка на выплату {payment_id} для продавца {seller_id} на сумму {amount}")
         markup = types.InlineKeyboardMarkup()
         markup.row(
             types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"payment_confirm_{payment_id}_{amount}"),
@@ -77,6 +87,7 @@ def register_payment_handlers(bot):
                 parse_mode='Markdown',
                 reply_markup=markup
             )
+            logger.info(f"Запрос на выплату {payment_id} отправлен админу")
         except Exception as e:
             logger.error(f"Ошибка отправки админу: {e}")
             bot.reply_to(message, "❌ Не удалось уведомить администратора.")
@@ -86,6 +97,7 @@ def register_payment_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('payment_confirm_'))
     def payment_confirm(call):
         user_id = call.from_user.id
+        logger.info(f"✅ Админ подтверждает выплату, пользователь {user_id}")
         if user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
@@ -100,6 +112,7 @@ def register_payment_handlers(bot):
             bot.answer_callback_query(call.id, f"✅ Заявка уже {payment['status']}")
             return
         update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
+        logger.info(f"Выплата {payment_id} подтверждена, сумма {amount}")
         seller = get_seller_by_id(payment['seller_id'])
         if seller:
             debt, _, _ = get_seller_debt(payment['seller_id'])
@@ -110,6 +123,7 @@ def register_payment_handlers(bot):
                     f"Ваш долг составляет *{debt} руб.*",
                     parse_mode='Markdown'
                 )
+                logger.info(f"Уведомление отправлено продавцу {seller['telegram_id']}")
             except Exception as e:
                 logger.error(f"Ошибка уведомления продавца: {e}")
         bot.edit_message_text(
@@ -122,6 +136,7 @@ def register_payment_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('payment_edit_'))
     def payment_edit(call):
         user_id = call.from_user.id
+        logger.info(f"✏️ Админ редактирует выплату, пользователь {user_id}")
         if user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
@@ -142,6 +157,8 @@ def register_payment_handlers(bot):
         bot.answer_callback_query(call.id)
 
     def process_edit_payment(message, payment_id, original_chat_id):
+        user_id = message.from_user.id
+        logger.info(f"✏️ Ввод новой суммы админом {user_id}")
         try:
             amount = int(message.text.strip())
             if amount <= 0:
@@ -154,6 +171,7 @@ def register_payment_handlers(bot):
             bot.reply_to(message, "❌ Заявка не найдена")
             return
         update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
+        logger.info(f"Выплата {payment_id} подтверждена с изменённой суммой {amount}")
         seller = get_seller_by_id(payment['seller_id'])
         if seller:
             debt, _, _ = get_seller_debt(payment['seller_id'])
