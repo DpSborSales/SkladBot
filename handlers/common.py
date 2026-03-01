@@ -9,6 +9,7 @@ from models import (
 from keyboards import main_keyboard
 from notifications import send_negative_stock_warning
 from database import get_db_connection
+from config import HUB_SELLER_ID
 
 logger = logging.getLogger(__name__)
 
@@ -65,36 +66,101 @@ def register_common_handlers(bot):
         if not seller:
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT order_number, items FROM orders
-                    WHERE seller_id = %s AND status = 'completed' AND stock_processed = FALSE
-                    ORDER BY id DESC
-                """, (seller['id'],))
-                pending = cur.fetchall()
-        if not pending:
-            bot.reply_to(message, "✅ Нет заказов, ожидающих обработки.")
-            return
-        for order in pending:
-            order_number = order['order_number']
-            items = order['items']
-            items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in items])
-            markup = types.InlineKeyboardMarkup()
-            markup.row(
-                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{order_number}"),
-                types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{order_number}")
-            )
-            bot.send_message(
-                message.chat.id,
-                f"📦 *Заказ {order_number}*\n\n{items_text}",
-                parse_mode='Markdown',
-                reply_markup=markup
-            )
+
+        if seller['id'] == HUB_SELLER_ID:
+            # Для кладовщика показываем как заказы, так и заявки
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Заказы, ожидающие подтверждения (stock_processed = FALSE)
+                    cur.execute("""
+                        SELECT order_number, items FROM orders
+                        WHERE seller_id = %s AND status = 'completed' AND stock_processed = FALSE
+                        ORDER BY id DESC
+                    """, (seller['id'],))
+                    pending_orders = cur.fetchall()
+
+                    # Заявки на перемещение со статусом pending
+                    cur.execute("""
+                        SELECT id, product_id, quantity, to_seller_id
+                        FROM transfer_requests
+                        WHERE from_seller_id = %s AND status = 'pending'
+                        ORDER BY id DESC
+                    """, (seller['id'],))
+                    pending_transfers = cur.fetchall()
+
+            if not pending_orders and not pending_transfers:
+                bot.reply_to(message, "✅ Нет заказов и заявок, ожидающих обработки.")
+                return
+
+            # Отправляем заказы
+            for order in pending_orders:
+                order_number = order['order_number']
+                items = order['items']
+                items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in items])
+                markup = types.InlineKeyboardMarkup()
+                markup.row(
+                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{order_number}"),
+                    types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{order_number}")
+                )
+                bot.send_message(
+                    message.chat.id,
+                    f"📦 *Заказ {order_number}*\n\n{items_text}",
+                    parse_mode='Markdown',
+                    reply_markup=markup
+                )
+
+            # Отправляем заявки
+            for tr in pending_transfers:
+                products = get_all_products()
+                product_name = next((p['name'] for p in products if p['id'] == tr['product_id']), f"Товар {tr['product_id']}")
+                seller_to = get_seller_by_id(tr['to_seller_id'])
+                seller_name = seller_to['name'] if seller_to else f"Продавец {tr['to_seller_id']}"
+                markup = types.InlineKeyboardMarkup()
+                markup.row(
+                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{tr['id']}"),
+                    types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{tr['id']}")
+                )
+                bot.send_message(
+                    message.chat.id,
+                    f"📦 *Заявка на перемещение №{tr['id']}*\n\n"
+                    f"Продавец: {seller_name}\n"
+                    f"Товар: {product_name}\n"
+                    f"Количество: {tr['quantity']}",
+                    parse_mode='Markdown',
+                    reply_markup=markup
+                )
+
+        else:
+            # Для обычного продавца – только заказы
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT order_number, items FROM orders
+                        WHERE seller_id = %s AND status = 'completed' AND stock_processed = FALSE
+                        ORDER BY id DESC
+                    """, (seller['id'],))
+                    pending = cur.fetchall()
+            if not pending:
+                bot.reply_to(message, "✅ Нет заказов, ожидающих обработки.")
+                return
+            for order in pending:
+                order_number = order['order_number']
+                items = order['items']
+                items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in items])
+                markup = types.InlineKeyboardMarkup()
+                markup.row(
+                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{order_number}"),
+                    types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_{order_number}")
+                )
+                bot.send_message(
+                    message.chat.id,
+                    f"📦 *Заказ {order_number}*\n\n{items_text}",
+                    parse_mode='Markdown',
+                    reply_markup=markup
+                )
 
     @bot.message_handler(func=lambda m: m.text == "📦 Мои остатки")
     def handle_my_stock(message):
-        # Переиспользуем команду /stock
         handle_stock(message)
 
-    # Здесь могут быть другие общие обработчики, например, для команды /help
+    # Остальные обработчики (если есть)
