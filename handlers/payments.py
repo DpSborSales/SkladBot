@@ -1,3 +1,4 @@
+# handlers/payments.py
 import logging
 from telebot import types
 from models import (
@@ -60,7 +61,6 @@ def register_payment_handlers(bot):
         payment_id = create_payment_request(seller_id, amount)
         seller = get_seller_by_id(seller_id)
         debt, _, _ = get_seller_debt(seller_id)
-        # Отправляем админу
         markup = types.InlineKeyboardMarkup()
         markup.row(
             types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"payment_confirm_{payment_id}_{amount}"),
@@ -99,9 +99,7 @@ def register_payment_handlers(bot):
         if payment['status'] != 'pending':
             bot.answer_callback_query(call.id, f"✅ Заявка уже {payment['status']}")
             return
-        # Подтверждаем
         update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
-        # Уведомляем продавца
         seller = get_seller_by_id(payment['seller_id'])
         if seller:
             debt, _, _ = get_seller_debt(payment['seller_id'])
@@ -155,7 +153,6 @@ def register_payment_handlers(bot):
         if not payment:
             bot.reply_to(message, "❌ Заявка не найдена")
             return
-        # Обновляем сумму и подтверждаем
         update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
         seller = get_seller_by_id(payment['seller_id'])
         if seller:
