@@ -1,8 +1,9 @@
+# models.py
 import json
 import logging
 from datetime import datetime
 from database import get_db_connection
-from config import HUB_SELLER_ID
+from config import HUB_SELLER_ID, ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
@@ -158,11 +159,10 @@ def update_transfer_request_status(request_id: int, status: str):
 def get_seller_debt(seller_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Определяем поле цены в зависимости от того, хаб это или обычный продавец
             if seller_id == HUB_SELLER_ID:
-                price_field = "p.price"  # для хаба - цена покупателя
+                price_field = "p.price"
             else:
-                price_field = "p.price_seller"  # для остальных - цена продавца
+                price_field = "p.price_seller"
 
             cur.execute(f"""
                 SELECT COALESCE(SUM({price_field} * (i->>'quantity')::int), 0) as total_sales
@@ -239,10 +239,6 @@ def update_payment_status(payment_id: int, status: str, confirmed_amount: int = 
 
 # ========== Закупки (только для админа) ==========
 def create_purchase(seller_id: int, items: list, total: int, comment: str = "") -> int:
-    """
-    Создаёт закупку и возвращает её ID.
-    items: список словарей [{'product_id': int, 'quantity': int, 'price_per_unit': int}]
-    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -257,8 +253,6 @@ def create_purchase(seller_id: int, items: list, total: int, comment: str = "") 
                     INSERT INTO purchase_items (purchase_id, product_id, quantity, price_per_unit, total)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (purchase_id, item['product_id'], item['quantity'], item['price_per_unit'], item['price_per_unit'] * item['quantity']))
-
-                # Увеличиваем остаток на хабе (HUB_SELLER_ID)
                 increase_seller_stock(
                     seller_id=HUB_SELLER_ID,
                     product_id=item['product_id'],
@@ -300,7 +294,6 @@ def get_purchases_history(limit: int = 20):
 
 # ========== Расширенные функции для админа ==========
 def get_all_sellers_stock():
-    """Возвращает остатки всех продавцов и хаба сгруппированно."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -313,14 +306,10 @@ def get_all_sellers_stock():
             return cur.fetchall()
 
 def get_total_payments_stats():
-    """Общая сумма выплат и долгов по всем продавцам (кроме хаба)."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Общая сумма всех подтверждённых выплат
             cur.execute("SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid FROM seller_payments WHERE status = 'confirmed'")
             total_paid = cur.fetchone()['total_paid']
-
-            # Общий долг всех продавцов (кроме хаба) – сумма по price_seller
             cur.execute("""
                 SELECT COALESCE(SUM(p.price_seller * (i->>'quantity')::int), 0) as total_debt
                 FROM orders o, jsonb_array_elements(o.items) i
@@ -328,11 +317,9 @@ def get_total_payments_stats():
                 WHERE o.status = 'completed' AND o.stock_processed = TRUE
             """)
             total_debt = cur.fetchone()['total_debt']
-
             return total_paid, total_debt
 
 def get_pending_payments():
-    """Возвращает все неподтверждённые выплаты."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
