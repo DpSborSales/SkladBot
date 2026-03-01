@@ -285,27 +285,53 @@ def register_admin_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_new" and is_admin(call.from_user.id))
     def purchase_new(call):
         user_id = call.from_user.id
+        # Если уже есть незавершённая закупка, предупредим
+        if user_id in purchase_sessions:
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Начать новую", callback_data="purchase_force_new"),
+                types.InlineKeyboardButton("❌ Отмена", callback_data="purchase_abort")
+            )
+            bot.edit_message_text(
+                "⚠️ У вас уже есть незавершённая закупка. Начать новую?",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=markup
+            )
+            return
         purchase_sessions[user_id] = {
             'items': [],
             'message_id': call.message.message_id,
             'chat_id': call.message.chat.id
         }
-        products = get_all_products()
-        if not products:
-            bot.edit_message_text("❌ Нет товаров.", call.message.chat.id, call.message.message_id)
+        show_product_list(user_id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_force_new" and is_admin(call.from_user.id))
+    def purchase_force_new(call):
+        user_id = call.from_user.id
+        purchase_sessions[user_id] = {
+            'items': [],
+            'message_id': call.message.message_id,
+            'chat_id': call.message.chat.id
+        }
+        show_product_list(user_id)
+
+    def show_product_list(user_id):
+        session = purchase_sessions.get(user_id)
+        if not session:
             return
+        products = get_all_products()
         markup = types.InlineKeyboardMarkup(row_width=2)
         for p in products:
             markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
-        markup.add(types.InlineKeyboardButton("✅ Завершить закупку", callback_data="purchase_finish"))
+        markup.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="purchase_abort"))
         bot.edit_message_text(
-            "🛒 *Новая закупка*\n\nВыберите товар:",
-            call.message.chat.id,
-            call.message.message_id,
+            "🛒 *Выберите товар для закупки:*",
+            session['chat_id'],
+            session['message_id'],
             parse_mode='Markdown',
             reply_markup=markup
         )
-        bot.answer_callback_query(call.id)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('purchase_prod_') and is_admin(call.from_user.id))
     def purchase_select_product(call):
@@ -339,17 +365,7 @@ def register_admin_handlers(bot):
         except:
             bot.reply_to(message, "❌ Введите положительное целое число.")
             # возвращаем к выбору товара
-            products = get_all_products()
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            for p in products:
-                markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
-            markup.add(types.InlineKeyboardButton("✅ Завершить закупку", callback_data="purchase_finish"))
-            bot.send_message(
-                session['chat_id'],
-                "🛒 *Выберите товар:*",
-                parse_mode='Markdown',
-                reply_markup=markup
-            )
+            show_product_list(user_id)
             return
         products = get_all_products()
         product = next((p for p in products if p['id'] == product_id), None)
@@ -411,7 +427,7 @@ def register_admin_handlers(bot):
         markup = types.InlineKeyboardMarkup()
         markup.row(
             types.InlineKeyboardButton("✅ Завершить закупку", callback_data="purchase_finish"),
-            types.InlineKeyboardButton("➕ Добавить товар", callback_data="purchase_new"),
+            types.InlineKeyboardButton("➕ Добавить товар", callback_data="purchase_add_item"),
             types.InlineKeyboardButton("❌ Отмена", callback_data="purchase_abort")
         )
         bot.send_message(
@@ -420,6 +436,33 @@ def register_admin_handlers(bot):
             parse_mode='Markdown',
             reply_markup=markup
         )
+
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_add_item" and is_admin(call.from_user.id))
+    def purchase_add_item(call):
+        user_id = call.from_user.id
+        session = purchase_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+        products = get_all_products()
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for p in products:
+            markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад к сводке", callback_data="purchase_show_summary"))
+        bot.edit_message_text(
+            "🛒 *Добавление товара*\n\nВыберите товар:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_show_summary" and is_admin(call.from_user.id))
+    def purchase_show_summary(call):
+        user_id = call.from_user.id
+        show_purchase_summary(user_id)
+        bot.answer_callback_query(call.id)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('purchase_change_item_') and is_admin(call.from_user.id))
     def purchase_change_item(call):
@@ -448,17 +491,7 @@ def register_admin_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
         bot.delete_message(session['chat_id'], call.message.message_id)
-        products = get_all_products()
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for p in products:
-            markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
-        markup.add(types.InlineKeyboardButton("✅ Завершить закупку", callback_data="purchase_finish"))
-        bot.send_message(
-            session['chat_id'],
-            "🛒 *Выберите товар:*",
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
+        show_purchase_summary(user_id)
         bot.answer_callback_query(call.id)
 
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_finish" and is_admin(call.from_user.id))
@@ -479,7 +512,7 @@ def register_admin_handlers(bot):
         markup = types.InlineKeyboardMarkup()
         markup.row(
             types.InlineKeyboardButton("✅ Подтвердить закупку", callback_data="purchase_confirm_final"),
-            types.InlineKeyboardButton("➕ Добавить товар", callback_data="purchase_new"),
+            types.InlineKeyboardButton("➕ Добавить товар", callback_data="purchase_add_item"),
             types.InlineKeyboardButton("❌ Отмена", callback_data="purchase_abort")
         )
         bot.edit_message_text(
