@@ -158,8 +158,14 @@ def update_transfer_request_status(request_id: int, status: str):
 def get_seller_debt(seller_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT COALESCE(SUM(p.price_seller * (i->>'quantity')::int), 0) as total_sales
+            # Определяем поле цены в зависимости от того, хаб это или обычный продавец
+            if seller_id == HUB_SELLER_ID:
+                price_field = "p.price"  # для хаба - цена покупателя
+            else:
+                price_field = "p.price_seller"  # для остальных - цена продавца
+
+            cur.execute(f"""
+                SELECT COALESCE(SUM({price_field} * (i->>'quantity')::int), 0) as total_sales
                 FROM orders o, jsonb_array_elements(o.items) i
                 JOIN products p ON (i->>'productId')::int = p.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
