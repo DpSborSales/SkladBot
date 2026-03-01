@@ -148,7 +148,7 @@ def register_payment_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Ошибка базы данных", show_alert=True)
             return
         bot.edit_message_text(
-            f"✅ Вы подтвердили получение {amount} руб. от продавца.",
+            f"✅ Вы подтвердили получение {amount} руб. от продавца {seller['name'] if seller else 'неизвестного'}.",
             call.message.chat.id,
             call.message.message_id
         )
@@ -217,4 +217,4 @@ def register_payment_handlers(bot):
             logger.error(f"Ошибка при подтверждении выплаты: {e}")
             bot.reply_to(message, "❌ Ошибка базы данных")
             return
-        bot.reply_to(message, f"✅ Вы подтвердили получение {amount} руб. от продавца.")
+        bot.reply_to(message, f"✅ Вы подтвердили получение {amount} руб. от продавца {seller['name'] if seller else 'неизвестного'}.")
