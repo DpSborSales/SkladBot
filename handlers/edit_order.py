@@ -1,16 +1,16 @@
+# handlers/edit_order.py
 import logging
 from telebot import types
 from models import (
     get_order_by_number, get_seller_by_telegram_id, get_all_products,
     get_seller_stock, decrease_seller_stock, mark_order_as_processed,
-    send_negative_stock_warning
+    get_negative_stock_summary, send_negative_stock_warning
 )
 from keyboards import main_keyboard
 from utils import format_selected_summary
 
 logger = logging.getLogger(__name__)
 
-# Хранилище сессий редактирования (доступно только в этом модуле)
 edit_sessions = {}
 
 def register_edit_handlers(bot):
@@ -34,7 +34,6 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
             return
 
-        # Списываем товары
         for item in order['items']:
             decrease_seller_stock(
                 seller_id=seller['id'],
@@ -53,10 +52,9 @@ def register_edit_handlers(bot):
             call.message.message_id
         )
 
-        # Проверяем отрицательные остатки и отправляем предупреждение
         negatives = get_negative_stock_summary(seller['id'])
         if negatives:
-            send_negative_stock_warning(call.message.chat.id, seller['id'])
+            send_negative_stock_warning(bot, call.message.chat.id, seller['id'])
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_'))
     def handle_edit(call):
@@ -321,7 +319,6 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
             return
 
-        # Списываем
         for product_id, qty in selected.items():
             if qty > 0:
                 decrease_seller_stock(
@@ -342,10 +339,9 @@ def register_edit_handlers(bot):
             session['message_id']
         )
 
-        # Проверяем отрицательные остатки
         negatives = get_negative_stock_summary(seller['id'])
         if negatives:
-            send_negative_stock_warning(session['chat_id'], seller['id'])
+            send_negative_stock_warning(bot, session['chat_id'], seller['id'])
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('nochanges_'))
     def no_changes(call):
@@ -372,7 +368,6 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
             return
 
-        # Списываем исходные количества
         for item in order['items']:
             decrease_seller_stock(
                 seller_id=seller['id'],
@@ -390,10 +385,9 @@ def register_edit_handlers(bot):
             session['message_id']
         )
 
-        # Проверяем отрицательные остатки
         negatives = get_negative_stock_summary(seller['id'])
         if negatives:
-            send_negative_stock_warning(session['chat_id'], seller['id'])
+            send_negative_stock_warning(bot, session['chat_id'], seller['id'])
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('editagain_'))
     def edit_again(call):
