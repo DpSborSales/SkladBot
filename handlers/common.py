@@ -2,14 +2,14 @@
 import logging
 from telebot import types
 from models import (
-    get_seller_by_telegram_id, get_all_products, get_seller_stock,
-    get_order_by_number, decrease_seller_stock, mark_order_as_processed,
+    get_seller_by_telegram_id, get_order_by_number, get_all_products,
+    get_seller_stock, decrease_seller_stock, mark_order_as_processed,
     get_negative_stock_summary
 )
 from keyboards import main_keyboard, admin_keyboard
 from notifications import send_negative_stock_warning
-from database import get_db_connection
 from config import ADMIN_ID
+from database import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ def register_common_handlers(bot):
     def handle_start(message):
         user_id = message.from_user.id
         seller = get_seller_by_telegram_id(user_id)
-        if not seller:
+        if not seller and user_id != ADMIN_ID:
             bot.reply_to(message, "❌ У вас нет доступа к этому боту.")
             return
         bot.send_message(
@@ -28,6 +28,12 @@ def register_common_handlers(bot):
             "Используйте кнопки ниже для навигации.",
             reply_markup=main_keyboard()
         )
+        if user_id == ADMIN_ID:
+            bot.send_message(
+                message.chat.id,
+                "👑 Вы администратор. Используйте кнопку '👑 Админ панель' для перехода.",
+                reply_markup=main_keyboard()
+            )
 
     @bot.message_handler(commands=['stock'])
     def handle_stock(message):
