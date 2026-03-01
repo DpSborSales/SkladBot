@@ -25,18 +25,29 @@ def register_payment_handlers(bot):
             logger.warning(f"❌ Пользователь {user_id} не является продавцом")
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
-        debt, total_sales, total_paid = get_seller_debt(seller['id'])
-        profit, total_buyer, total_seller = get_seller_profit(seller['id'])
-        logger.info(f"Долг продавца {seller['id']}: {debt}, прибыль: {profit}")
-        msg = (
-            f"💰 *Ваш расчётный счёт*\n\n"
-            f"Вы должны перевести Админу: *{debt} руб.*\n"
-            f"___________________________________________\n"
-            f"Ваша чистая прибыль за всё время: *{profit} руб.*"
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("💳 Произвести выплату", callback_data="make_payment"))
-        bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
+        try:
+            debt, total_sales, total_paid = get_seller_debt(seller['id'])
+            profit, total_buyer, total_seller = get_seller_profit(seller['id'])
+            logger.info(f"Долг продавца {seller['id']}: {debt}, прибыль: {profit}")
+            msg = (
+                f"💰 *Ваш расчётный счёт*\n\n"
+                f"Вы должны перевести Админу: *{debt} руб.*\n"
+                f"___________________________________________\n"
+                f"Ваша чистая прибыль за всё время: *{profit} руб.*"
+            )
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("💳 Произвести выплату", callback_data="make_payment"))
+            try:
+                bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
+                logger.info("✅ Сообщение о выплате отправлено")
+            except Exception as e:
+                logger.error(f"Ошибка отправки с Markdown: {e}")
+                # Отправляем без Markdown, если возникла ошибка
+                bot.send_message(message.chat.id, msg.replace('*', ''), reply_markup=markup)
+                logger.info("✅ Сообщение отправлено без Markdown")
+        except Exception as e:
+            logger.error(f"Ошибка при обработке выплаты: {e}")
+            bot.reply_to(message, "❌ Произошла внутренняя ошибка.")
 
     @bot.callback_query_handler(func=lambda call: call.data == "make_payment")
     def make_payment(call):
