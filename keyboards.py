@@ -1,3 +1,4 @@
+# keyboards.py
 from telebot import types
 
 def main_keyboard():
@@ -14,6 +15,5 @@ def admin_keyboard():
     keyboard.add(types.KeyboardButton("⏳ Ожидают обработки"))
     keyboard.add(types.KeyboardButton("📦 Остатки"), types.KeyboardButton("💰 Выплаты"))
     keyboard.add(types.KeyboardButton("📦 Закуп товаров"))
-    keyboard.add(types.KeyboardButton("➕ Зафиксировать продажу"))
     keyboard.add(types.KeyboardButton("🔙 Назад в общее меню"))
     return keyboard
