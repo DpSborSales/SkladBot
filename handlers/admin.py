@@ -1,4 +1,4 @@
-# handlers/admin.py (полный файл)
+# handlers/admin.py (полный файл с улучшенным логированием)
 import logging
 from datetime import datetime
 from telebot import types
@@ -261,7 +261,6 @@ def register_admin_handlers(bot):
             return
         markup = types.InlineKeyboardMarkup()
         for h in history:
-            # Проверим, что дата есть и она строка
             date_str = str(h['purchase_date'])[:10]
             btn_text = f"{date_str} – {h['total']} руб."
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"purchase_view_{h['id']}"))
@@ -277,7 +276,6 @@ def register_admin_handlers(bot):
             logger.info("Сообщение с историей успешно отредактировано")
         except Exception as e:
             logger.error(f"Ошибка при редактировании сообщения: {e}")
-            # Пробуем отправить новое сообщение
             bot.send_message(
                 call.message.chat.id,
                 "📜 *История закупок*\n\nВыберите запись:",
@@ -288,25 +286,36 @@ def register_admin_handlers(bot):
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('purchase_view_') and is_admin(call.from_user.id))
     def purchase_view(call):
-        purchase_id = int(call.data.split('_')[2])
-        purchase = get_purchase(purchase_id)
-        if not purchase:
-            bot.answer_callback_query(call.id, "❌ Закупка не найдена")
-            return
-        items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт (по {item['price_per_unit']} руб.)" for item in purchase['items']])
-        msg = (
-            f"📦 *Закупка от {purchase['purchase_date'][:10]}*\n\n"
-            f"{items_text}\n\n"
-            f"Итого: *{purchase['total']} руб.*\n"
-            f"Комментарий: {purchase['comment']}"
-        )
-        bot.edit_message_text(
-            msg,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown'
-        )
-        bot.answer_callback_query(call.id)
+        logger.info(f"✅ Вызван purchase_view с data={call.data}")
+        try:
+            parts = call.data.split('_')
+            if len(parts) < 3:
+                logger.error(f"Неверный формат callback: {call.data}")
+                bot.answer_callback_query(call.id, "❌ Ошибка данных")
+                return
+            purchase_id = int(parts[2])
+            purchase = get_purchase(purchase_id)
+            if not purchase:
+                logger.error(f"Закупка {purchase_id} не найдена")
+                bot.answer_callback_query(call.id, "❌ Закупка не найдена")
+                return
+            items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт (по {item['price_per_unit']} руб.)" for item in purchase['items']])
+            msg = (
+                f"📦 *Закупка от {purchase['purchase_date'][:10]}*\n\n"
+                f"{items_text}\n\n"
+                f"Итого: *{purchase['total']} руб.*\n"
+                f"Комментарий: {purchase['comment']}"
+            )
+            bot.edit_message_text(
+                msg,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='Markdown'
+            )
+            bot.answer_callback_query(call.id)
+        except Exception as e:
+            logger.error(f"Ошибка в purchase_view: {e}")
+            bot.answer_callback_query(call.id, "❌ Внутренняя ошибка")
 
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_new" and is_admin(call.from_user.id))
     def purchase_new(call):
