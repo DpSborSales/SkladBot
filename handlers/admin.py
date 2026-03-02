@@ -1,4 +1,4 @@
-# handlers/admin.py (полный файл с улучшенным логированием)
+# handlers/admin.py (полный файл с исправлением purchase_view)
 import logging
 from datetime import datetime
 from telebot import types
@@ -299,9 +299,10 @@ def register_admin_handlers(bot):
                 logger.error(f"Закупка {purchase_id} не найдена")
                 bot.answer_callback_query(call.id, "❌ Закупка не найдена")
                 return
+            date_str = str(purchase['purchase_date'])[:10] if purchase['purchase_date'] else 'неизвестно'
             items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт (по {item['price_per_unit']} руб.)" for item in purchase['items']])
             msg = (
-                f"📦 *Закупка от {purchase['purchase_date'][:10]}*\n\n"
+                f"📦 *Закупка от {date_str}*\n\n"
                 f"{items_text}\n\n"
                 f"Итого: *{purchase['total']} руб.*\n"
                 f"Комментарий: {purchase['comment']}"
