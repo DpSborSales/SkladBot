@@ -28,12 +28,6 @@ def register_common_handlers(bot):
             "Используйте кнопки ниже для навигации.",
             reply_markup=main_keyboard()
         )
-        if user_id == ADMIN_ID:
-            bot.send_message(
-                message.chat.id,
-                "👑 Вы администратор. Используйте кнопку '👑 Админ панель' для перехода.",
-                reply_markup=main_keyboard()
-            )
 
     @bot.message_handler(commands=['stock'])
     def handle_stock(message):
