@@ -26,7 +26,7 @@ def register_payment_handlers(bot):
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
         try:
-            debt, total_sales, total_paid = get_seller_debt(seller['id'])
+            debt, total_sales, total_paid, total_direct = get_seller_debt(seller['id'])
             profit, total_buyer, total_seller = get_seller_profit(seller['id'])
             logger.info(f"Долг продавца {seller['id']}: {debt}, прибыль: {profit}")
             msg = (
@@ -56,7 +56,7 @@ def register_payment_handlers(bot):
         if not seller:
             bot.answer_callback_query(call.id, "❌ Ошибка доступа")
             return
-        debt, _, _ = get_seller_debt(seller['id'])
+        debt, _, _, _ = get_seller_debt(seller['id'])
         logger.info(f"Долг продавца {seller['id']}: {debt}")
         bot.edit_message_text(
             f"💳 Ваш долг: *{debt} руб.*\n\nВведите сумму, которую передаёте Админу:",
@@ -79,7 +79,7 @@ def register_payment_handlers(bot):
             return
         payment_id = create_payment_request(seller_id, amount)
         seller = get_seller_by_id(seller_id)
-        debt, _, _ = get_seller_debt(seller_id)
+        debt, _, _, _ = get_seller_debt(seller_id)
         logger.info(f"Создана заявка на выплату {payment_id} для продавца {seller_id} на сумму {amount}")
         markup = types.InlineKeyboardMarkup()
         markup.row(
@@ -132,7 +132,7 @@ def register_payment_handlers(bot):
             logger.info(f"Выплата {payment_id} подтверждена, сумма {amount}")
             seller = get_seller_by_id(payment['seller_id'])
             if seller:
-                debt, _, _ = get_seller_debt(payment['seller_id'])
+                debt, _, _, _ = get_seller_debt(payment['seller_id'])
                 try:
                     bot.send_message(
                         seller['telegram_id'],
@@ -161,12 +161,7 @@ def register_payment_handlers(bot):
         if user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
-        parts = call.data.split('_')
-        if len(parts) < 3:
-            logger.error(f"Неверный формат callback: {call.data}")
-            bot.answer_callback_query(call.id, "❌ Ошибка данных")
-            return
-        payment_id = int(parts[2])
+        payment_id = int(call.data.split('_')[2])
         payment = get_payment_request(payment_id)
         if not payment:
             logger.error(f"Заявка {payment_id} не найдена")
@@ -203,7 +198,7 @@ def register_payment_handlers(bot):
             logger.info(f"Выплата {payment_id} подтверждена с изменённой суммой {amount}")
             seller = get_seller_by_id(payment['seller_id'])
             if seller:
-                debt, _, _ = get_seller_debt(payment['seller_id'])
+                debt, _, _, _ = get_seller_debt(payment['seller_id'])
                 try:
                     bot.send_message(
                         seller['telegram_id'],
