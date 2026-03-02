@@ -1,4 +1,4 @@
-# handlers/admin.py
+# handlers/admin.py (полный файл)
 import logging
 from datetime import datetime
 from telebot import types
@@ -240,13 +240,22 @@ def register_admin_handlers(bot):
 
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_history" and is_admin(call.from_user.id))
     def purchase_history(call):
-        history = get_purchases_history(10)
+        user_id = call.from_user.id
+        logger.info(f"📜 Вызвана история закупок пользователем {user_id}")
+        try:
+            history = get_purchases_history(10)
+            logger.info(f"Получено {len(history)} записей истории")
+        except Exception as e:
+            logger.error(f"Ошибка при получении истории закупок: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка базы данных")
+            return
         if not history:
             bot.edit_message_text(
                 "📭 История закупок пуста.",
                 call.message.chat.id,
                 call.message.message_id
             )
+            bot.answer_callback_query(call.id)
             return
         markup = types.InlineKeyboardMarkup()
         for h in history:
