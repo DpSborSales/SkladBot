@@ -25,26 +25,33 @@ def register_admin_handlers(bot):
     @bot.message_handler(func=lambda m: m.text == "⏳ Ожидают обработки" and is_admin(m.from_user.id))
     def handle_pending_payments(message):
         logger.info("Вызван handle_pending_payments")
-        pending = get_pending_payments()
-        if not pending:
-            bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат.")
-            return
-        for p in pending:
-            markup = types.InlineKeyboardMarkup()
-            markup.row(
-                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_pay_confirm_{p['id']}"),
-                types.InlineKeyboardButton("✏️ Изменить", callback_data=f"admin_pay_edit_{p['id']}")
-            )
-            bot.send_message(
-                message.chat.id,
-                f"💸 *Запрос на выплату*\n\n"
-                f"Продавец: {p['seller_name']}\n"
-                f"Сумма: {p['amount']} руб.\n"
-                f"Дата: {p['created_at'][:10]}\n\n"
-                f"Действие:",
-                parse_mode='Markdown',
-                reply_markup=markup
-            )
+        try:
+            pending = get_pending_payments()
+            logger.info(f"Найдено неподтверждённых выплат: {len(pending)}")
+            if not pending:
+                bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат.")
+                logger.info("Сообщение о пустоте отправлено")
+                return
+            for p in pending:
+                markup = types.InlineKeyboardMarkup()
+                markup.row(
+                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_pay_confirm_{p['id']}"),
+                    types.InlineKeyboardButton("✏️ Изменить", callback_data=f"admin_pay_edit_{p['id']}")
+                )
+                bot.send_message(
+                    message.chat.id,
+                    f"💸 *Запрос на выплату*\n\n"
+                    f"Продавец: {p['seller_name']}\n"
+                    f"Сумма: {p['amount']} руб.\n"
+                    f"Дата: {p['created_at'][:10]}\n\n"
+                    f"Действие:",
+                    parse_mode='Markdown',
+                    reply_markup=markup
+                )
+                logger.info(f"Отправлено сообщение по выплате {p['id']}")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_pending_payments: {e}")
+            bot.send_message(message.chat.id, "❌ Произошла ошибка при загрузке выплат.")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_pay_confirm_') and is_admin(call.from_user.id))
     def admin_pay_confirm(call):
@@ -185,21 +192,27 @@ def register_admin_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "💰 Выплаты" and is_admin(m.from_user.id))
     def handle_payments_stats(message):
-        total_paid, total_debt = get_total_payments_stats()
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id, name FROM sellers WHERE id != %s ORDER BY name", (HUB_SELLER_ID,))
-                sellers = cur.fetchall()
-        msg = (
-            f"💰 *Финансовая сводка*\n\n"
-            f"Всего выплачено продавцами: *{total_paid} руб.*\n"
-            f"Общий долг продавцов: *{total_debt} руб.*\n\n"
-            f"*Детали по продавцам:*"
-        )
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for s in sellers:
-            markup.add(types.InlineKeyboardButton(s['name'], callback_data=f"payments_seller_{s['id']}"))
-        bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
+        logger.info("Вызван handle_payments_stats")
+        try:
+            total_paid, total_debt = get_total_payments_stats()
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id, name FROM sellers WHERE id != %s ORDER BY name", (HUB_SELLER_ID,))
+                    sellers = cur.fetchall()
+            msg = (
+                f"💰 *Финансовая сводка*\n\n"
+                f"Всего выплачено продавцами: *{total_paid} руб.*\n"
+                f"Общий долг продавцов: *{total_debt} руб.*\n\n"
+                f"*Детали по продавцам:*"
+            )
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            for s in sellers:
+                markup.add(types.InlineKeyboardButton(s['name'], callback_data=f"payments_seller_{s['id']}"))
+            bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
+            logger.info("Сообщение о выплатах отправлено")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_payments_stats: {e}")
+            bot.send_message(message.chat.id, "❌ Ошибка при загрузке статистики.")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('payments_seller_') and is_admin(call.from_user.id))
     def payments_seller(call):
