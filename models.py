@@ -1,3 +1,4 @@
+# models.py (полный файл с исправлениями)
 import json
 import logging
 from datetime import datetime
@@ -154,29 +155,15 @@ def update_transfer_request_status(request_id: int, status: str):
             )
             conn.commit()
 
-# ========== Прямые продажи (без заказа) ==========
-def create_direct_sale(seller_id: int, items: list, total: int) -> int:
-    """Создаёт запись о прямой продаже и возвращает её ID."""
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO direct_sales (seller_id, items, total)
-                VALUES (%s, %s, %s)
-                RETURNING id
-            """, (seller_id, json.dumps(items), total))
-            sale_id = cur.fetchone()['id']
-            conn.commit()
-            return sale_id
-
 # ========== Расчёты с продавцами ==========
 def get_seller_debt(seller_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Сумма по заказам (price_seller для обычных продавцов, price для хаба)
             if seller_id == HUB_SELLER_ID:
                 price_field = "p.price"
             else:
                 price_field = "p.price_seller"
+
             cur.execute(f"""
                 SELECT COALESCE(SUM({price_field} * (i->>'quantity')::int), 0) as total_sales
                 FROM orders o, jsonb_array_elements(o.items) i
@@ -185,21 +172,19 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_sales = cur.fetchone()['total_sales']
 
-            # Сумма по прямым продажам
-            cur.execute("""
-                SELECT COALESCE(SUM(total), 0) as total_direct
-                FROM direct_sales
-                WHERE seller_id = %s
-            """, (seller_id,))
-            total_direct = cur.fetchone()['total_direct']
-
-            # Сумма выплат
             cur.execute("""
                 SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid
                 FROM seller_payments
                 WHERE seller_id = %s AND status = 'confirmed'
             """, (seller_id,))
             total_paid = cur.fetchone()['total_paid']
+
+            cur.execute("""
+                SELECT COALESCE(SUM(total), 0) as total_direct
+                FROM direct_sales
+                WHERE seller_id = %s
+            """, (seller_id,))
+            total_direct = cur.fetchone()['total_direct']
 
             debt = total_sales + total_direct - total_paid
             return debt, total_sales, total_paid, total_direct
@@ -258,6 +243,19 @@ def update_payment_status(payment_id: int, status: str, confirmed_amount: int = 
                     (status, datetime.utcnow().isoformat(), payment_id)
                 )
             conn.commit()
+
+# ========== Прямые продажи ==========
+def create_direct_sale(seller_id: int, items: list, total: int) -> int:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO direct_sales (seller_id, items, total)
+                VALUES (%s, %s, %s)
+                RETURNING id
+            """, (seller_id, json.dumps(items), total))
+            sale_id = cur.fetchone()['id']
+            conn.commit()
+            return sale_id
 
 # ========== Закупки (только для админа) ==========
 def create_purchase(seller_id: int, items: list, total: int, comment: str = "") -> int:
@@ -345,10 +343,17 @@ def get_pending_payments():
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT sp.*, s.name as seller_name
+                SELECT sp.id, sp.seller_id, sp.amount, sp.status, sp.created_at, s.name as seller_name
                 FROM seller_payments sp
                 JOIN sellers s ON sp.seller_id = s.id
                 WHERE sp.status = 'pending'
                 ORDER BY sp.created_at DESC
             """)
-            return cur.fetchall()
+            rows = cur.fetchall()
+            result = []
+            for row in rows:
+                row_dict = dict(row)
+                if 'created_at' in row_dict and row_dict['created_at']:
+                    row_dict['created_at'] = str(row_dict['created_at'])
+                result.append(row_dict)
+            return result
