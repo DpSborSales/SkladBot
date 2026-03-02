@@ -211,8 +211,8 @@ def register_admin_handlers(bot):
             f"💰 *Продавец {seller['name']}*\n\n"
             f"Долг перед админом: *{debt} руб.*\n"
             f"Всего продано (по цене продавца): {total_sales} руб.\n"
-            f"Прямые продажи: {total_direct} руб.\n"
             f"Всего выплачено: {total_paid} руб.\n"
+            f"Прямые продажи: {total_direct} руб.\n"
             f"Чистая прибыль: *{profit} руб.*\n"
             f"(продажи покупателям: {total_buyer} руб., закупочная стоимость: {total_seller} руб.)"
         )
@@ -324,7 +324,7 @@ def register_admin_handlers(bot):
         markup = types.InlineKeyboardMarkup(row_width=2)
         for p in products:
             markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
-        markup.add(types.InlineKeyboardButton("✅ Завершить закупку", callback_data="purchase_finish"))
+        markup.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="purchase_abort"))
         bot.edit_message_text(
             "🛒 *Выберите товар для закупки:*",
             session['chat_id'],
@@ -497,7 +497,7 @@ def register_admin_handlers(bot):
     def purchase_finish(call):
         user_id = call.from_user.id
         session = purchase_sessions.get(user_id)
-        if not session or not session.get('items'):
+        if not session or not session['items']:
             bot.answer_callback_query(call.id, "❌ Нет товаров в закупке")
             return
         products = get_all_products()
