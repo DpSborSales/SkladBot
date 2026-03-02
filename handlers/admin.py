@@ -1,4 +1,4 @@
-# handlers/admin.py
+# handlers/admin.py (полный исправленный файл)
 import logging
 from datetime import datetime
 from telebot import types
@@ -7,6 +7,7 @@ from models import (
     get_all_sellers_stock, get_pending_payments, get_payment_request,
     update_payment_status, get_seller_debt, get_seller_profit,
     create_purchase, get_purchases_history, get_purchase,
+    get_total_payments_stats,  # добавлено
     HUB_SELLER_ID, get_seller_by_id
 )
 from config import ADMIN_ID
@@ -28,30 +29,31 @@ def register_admin_handlers(bot):
         try:
             pending = get_pending_payments()
             logger.info(f"Найдено неподтверждённых выплат: {len(pending)}")
-            if not pending:
-                bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат.")
-                logger.info("Сообщение о пустоте отправлено")
-                return
-            for p in pending:
-                markup = types.InlineKeyboardMarkup()
-                markup.row(
-                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_pay_confirm_{p['id']}"),
-                    types.InlineKeyboardButton("✏️ Изменить", callback_data=f"admin_pay_edit_{p['id']}")
-                )
-                bot.send_message(
-                    message.chat.id,
-                    f"💸 *Запрос на выплату*\n\n"
-                    f"Продавец: {p['seller_name']}\n"
-                    f"Сумма: {p['amount']} руб.\n"
-                    f"Дата: {p['created_at'][:10]}\n\n"
-                    f"Действие:",
-                    parse_mode='Markdown',
-                    reply_markup=markup
-                )
-                logger.info(f"Отправлено сообщение по выплате {p['id']}")
         except Exception as e:
             logger.error(f"Ошибка в handle_pending_payments: {e}")
             bot.send_message(message.chat.id, "❌ Произошла ошибка при загрузке выплат.")
+            return
+        if not pending:
+            bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат.")
+            return
+        for p in pending:
+            # p['created_at'] уже строка, можно брать срез
+            date_str = p['created_at'][:10] if p['created_at'] else 'неизвестно'
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_pay_confirm_{p['id']}"),
+                types.InlineKeyboardButton("✏️ Изменить", callback_data=f"admin_pay_edit_{p['id']}")
+            )
+            bot.send_message(
+                message.chat.id,
+                f"💸 *Запрос на выплату*\n\n"
+                f"Продавец: {p['seller_name']}\n"
+                f"Сумма: {p['amount']} руб.\n"
+                f"Дата: {date_str}\n\n"
+                f"Действие:",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_pay_confirm_') and is_admin(call.from_user.id))
     def admin_pay_confirm(call):
@@ -195,24 +197,24 @@ def register_admin_handlers(bot):
         logger.info("Вызван handle_payments_stats")
         try:
             total_paid, total_debt = get_total_payments_stats()
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT id, name FROM sellers WHERE id != %s ORDER BY name", (HUB_SELLER_ID,))
-                    sellers = cur.fetchall()
-            msg = (
-                f"💰 *Финансовая сводка*\n\n"
-                f"Всего выплачено продавцами: *{total_paid} руб.*\n"
-                f"Общий долг продавцов: *{total_debt} руб.*\n\n"
-                f"*Детали по продавцам:*"
-            )
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            for s in sellers:
-                markup.add(types.InlineKeyboardButton(s['name'], callback_data=f"payments_seller_{s['id']}"))
-            bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
-            logger.info("Сообщение о выплатах отправлено")
         except Exception as e:
             logger.error(f"Ошибка в handle_payments_stats: {e}")
             bot.send_message(message.chat.id, "❌ Ошибка при загрузке статистики.")
+            return
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, name FROM sellers WHERE id != %s ORDER BY name", (HUB_SELLER_ID,))
+                sellers = cur.fetchall()
+        msg = (
+            f"💰 *Финансовая сводка*\n\n"
+            f"Всего выплачено продавцами: *{total_paid} руб.*\n"
+            f"Общий долг продавцов: *{total_debt} руб.*\n\n"
+            f"*Детали по продавцам:*"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for s in sellers:
+            markup.add(types.InlineKeyboardButton(s['name'], callback_data=f"payments_seller_{s['id']}"))
+        bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('payments_seller_') and is_admin(call.from_user.id))
     def payments_seller(call):
