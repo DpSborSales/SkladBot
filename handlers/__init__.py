@@ -1,3 +1,4 @@
+# handlers/__init__.py
 from .common import register_common_handlers
 from .edit_order import register_edit_handlers
 from .transfer import register_transfer_handlers
