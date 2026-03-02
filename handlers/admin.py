@@ -245,6 +245,8 @@ def register_admin_handlers(bot):
         try:
             history = get_purchases_history(10)
             logger.info(f"Получено {len(history)} записей истории")
+            if history:
+                logger.info(f"Первая запись: {history[0]}")
         except Exception as e:
             logger.error(f"Ошибка при получении истории закупок: {e}")
             bot.answer_callback_query(call.id, "❌ Ошибка базы данных")
@@ -259,15 +261,29 @@ def register_admin_handlers(bot):
             return
         markup = types.InlineKeyboardMarkup()
         for h in history:
-            btn_text = f"{h['purchase_date'][:10]} – {h['total']} руб."
+            # Проверим, что дата есть и она строка
+            date_str = str(h['purchase_date'])[:10]
+            btn_text = f"{date_str} – {h['total']} руб."
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"purchase_view_{h['id']}"))
-        bot.edit_message_text(
-            "📜 *История закупок*\n\nВыберите запись:",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
+        logger.info(f"Создано {len(history)} кнопок")
+        try:
+            bot.edit_message_text(
+                "📜 *История закупок*\n\nВыберите запись:",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+            logger.info("Сообщение с историей успешно отредактировано")
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
+            # Пробуем отправить новое сообщение
+            bot.send_message(
+                call.message.chat.id,
+                "📜 *История закупок*\n\nВыберите запись:",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
         bot.answer_callback_query(call.id)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('purchase_view_') and is_admin(call.from_user.id))
