@@ -1,4 +1,4 @@
-# handlers/admin.py (полный файл с исправлением purchase_view)
+# handlers/admin.py
 import logging
 from datetime import datetime
 from telebot import types
