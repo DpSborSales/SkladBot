@@ -16,11 +16,11 @@ def register_direct_sale_handlers(bot):
     @bot.message_handler(func=lambda m: m.text == "➕ Зафиксировать продажу")
     def handle_direct_sale(message):
         user_id = message.from_user.id
+        logger.info(f"➕ Нажата кнопка 'Зафиксировать продажу' пользователем {user_id}")
         seller = get_seller_by_telegram_id(user_id)
         if not seller:
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
-        # Инициализируем сессию
         direct_sale_sessions[user_id] = {
             'seller_id': seller['id'],
             'items': [],
@@ -49,6 +49,7 @@ def register_direct_sale_handlers(bot):
     def select_product(call):
         user_id = call.from_user.id
         product_id = int(call.data.split('_')[2])
+        logger.info(f"🔘 Выбран товар {product_id} пользователем {user_id}")
         session = direct_sale_sessions.get(user_id)
         if not session:
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
@@ -66,6 +67,7 @@ def register_direct_sale_handlers(bot):
         bot.answer_callback_query(call.id)
 
     def process_quantity(message, user_id, product_id):
+        logger.info(f"📝 Ввод количества для товара {product_id}, пользователь {user_id}")
         session = direct_sale_sessions.get(user_id)
         if not session:
             bot.reply_to(message, "❌ Сессия истекла. Начните заново.")
@@ -83,7 +85,13 @@ def register_direct_sale_handlers(bot):
         if not product:
             bot.reply_to(message, "❌ Товар не найден")
             return
+        # Используем цену для покупателя (price)
+        price = product.get('price', 0)
+        if price == 0:
+            bot.reply_to(message, "❌ У товара не указана цена.")
+            return
         session['temp_qty'] = qty
+        session['temp_price'] = price
         markup = types.InlineKeyboardMarkup()
         markup.row(
             types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"ds_confirm_{product_id}"),
@@ -101,12 +109,14 @@ def register_direct_sale_handlers(bot):
     def confirm_item(call):
         user_id = call.from_user.id
         product_id = int(call.data.split('_')[2])
+        logger.info(f"✅ Подтверждение товара {product_id} пользователем {user_id}")
         session = direct_sale_sessions.get(user_id)
         if not session:
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
         qty = session.pop('temp_qty', None)
-        if qty is None:
+        price = session.pop('temp_price', None)
+        if qty is None or price is None:
             bot.answer_callback_query(call.id, "❌ Ошибка данных")
             return
         products = get_all_products()
@@ -114,12 +124,11 @@ def register_direct_sale_handlers(bot):
         if not product:
             bot.answer_callback_query(call.id, "❌ Товар не найден")
             return
-        # Добавляем товар в список
         session['items'].append({
             'product_id': product_id,
             'name': product['name'],
             'quantity': qty,
-            'price': product['price_seller']  # для хаба price?
+            'price': price
         })
         bot.delete_message(session['chat_id'], call.message.message_id)
         show_summary(user_id)
@@ -151,6 +160,7 @@ def register_direct_sale_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "ds_add")
     def add_item(call):
         user_id = call.from_user.id
+        logger.info(f"➕ Добавление товара пользователем {user_id}")
         session = direct_sale_sessions.get(user_id)
         if not session:
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
@@ -162,6 +172,7 @@ def register_direct_sale_handlers(bot):
     def change_item(call):
         user_id = call.from_user.id
         product_id = int(call.data.split('_')[2])
+        logger.info(f"✏️ Изменение товара {product_id} пользователем {user_id}")
         session = direct_sale_sessions.get(user_id)
         if not session:
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
@@ -180,6 +191,7 @@ def register_direct_sale_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "ds_cancel")
     def cancel(call):
         user_id = call.from_user.id
+        logger.info(f"❌ Отмена пользователем {user_id}")
         direct_sale_sessions.pop(user_id, None)
         bot.edit_message_text(
             "❌ Действие отменено.",
@@ -191,13 +203,16 @@ def register_direct_sale_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "ds_confirm_sale")
     def confirm_sale(call):
         user_id = call.from_user.id
+        logger.info(f"✅ Вызван confirm_sale, user_id={user_id}")
         session = direct_sale_sessions.pop(user_id, None)
         if not session or not session['items']:
+            logger.warning(f"❌ Сессия пуста или не найдена для user_id={user_id}")
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
         seller_id = session['seller_id']
         items = session['items']
         total = sum(item['quantity'] * item['price'] for item in items)
+        logger.info(f"Продажа: seller={seller_id}, items={items}, total={total}")
         # Списываем товары со склада продавца
         for item in items:
             decrease_seller_stock(
@@ -209,6 +224,7 @@ def register_direct_sale_handlers(bot):
             )
         # Сохраняем прямую продажу
         sale_id = create_direct_sale(seller_id, items, total)
+        logger.info(f"✅ Продажа №{sale_id} сохранена")
         bot.edit_message_text(
             f"✅ Продажа №{sale_id} зафиксирована!\nТовары списаны со склада.",
             call.message.chat.id,
@@ -220,3 +236,19 @@ def register_direct_sale_handlers(bot):
         if negatives:
             send_negative_stock_warning(bot, session['chat_id'], seller_id)
         bot.answer_callback_query(call.id, "✅ Продажа подтверждена")
+
+    @bot.callback_query_handler(func=lambda call: call.data == "ds_finish")
+    def finish_without_items(call):
+        user_id = call.from_user.id
+        logger.info(f"🏁 Завершение без товаров пользователем {user_id}")
+        session = direct_sale_sessions.get(user_id)
+        if session and not session['items']:
+            direct_sale_sessions.pop(user_id, None)
+            bot.edit_message_text(
+                "✅ Продажа отменена (нет товаров).",
+                call.message.chat.id,
+                call.message.message_id
+            )
+        else:
+            bot.answer_callback_query(call.id, "❌ Ошибка")
+        bot.answer_callback_query(call.id)
