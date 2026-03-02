@@ -90,7 +90,7 @@ def register_admin_handlers(bot):
             return
         update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
         seller = get_seller_by_id(payment['seller_id'])
-        debt, _, _ = get_seller_debt(payment['seller_id'])
+        debt, _, _, _ = get_seller_debt(payment['seller_id'])
         try:
             bot.send_message(
                 seller['telegram_id'],
@@ -204,13 +204,14 @@ def register_admin_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('payments_seller_') and is_admin(call.from_user.id))
     def payments_seller(call):
         seller_id = int(call.data.split('_')[2])
-        debt, total_sales, total_paid = get_seller_debt(seller_id)
+        debt, total_sales, total_paid, total_direct = get_seller_debt(seller_id)
         profit, total_buyer, total_seller = get_seller_profit(seller_id)
         seller = get_seller_by_id(seller_id)
         msg = (
             f"💰 *Продавец {seller['name']}*\n\n"
             f"Долг перед админом: *{debt} руб.*\n"
             f"Всего продано (по цене продавца): {total_sales} руб.\n"
+            f"Прямые продажи: {total_direct} руб.\n"
             f"Всего выплачено: {total_paid} руб.\n"
             f"Чистая прибыль: *{profit} руб.*\n"
             f"(продажи покупателям: {total_buyer} руб., закупочная стоимость: {total_seller} руб.)"
@@ -285,7 +286,6 @@ def register_admin_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_new" and is_admin(call.from_user.id))
     def purchase_new(call):
         user_id = call.from_user.id
-        # Если уже есть незавершённая закупка, предупредим
         if user_id in purchase_sessions:
             markup = types.InlineKeyboardMarkup()
             markup.row(
@@ -324,7 +324,7 @@ def register_admin_handlers(bot):
         markup = types.InlineKeyboardMarkup(row_width=2)
         for p in products:
             markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
-        markup.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="purchase_abort"))
+        markup.add(types.InlineKeyboardButton("✅ Завершить закупку", callback_data="purchase_finish"))
         bot.edit_message_text(
             "🛒 *Выберите товар для закупки:*",
             session['chat_id'],
@@ -364,7 +364,6 @@ def register_admin_handlers(bot):
                 raise ValueError
         except:
             bot.reply_to(message, "❌ Введите положительное целое число.")
-            # возвращаем к выбору товара
             show_product_list(user_id)
             return
         products = get_all_products()
@@ -498,7 +497,7 @@ def register_admin_handlers(bot):
     def purchase_finish(call):
         user_id = call.from_user.id
         session = purchase_sessions.get(user_id)
-        if not session or not session['items']:
+        if not session or not session.get('items'):
             bot.answer_callback_query(call.id, "❌ Нет товаров в закупке")
             return
         products = get_all_products()
@@ -530,14 +529,26 @@ def register_admin_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_confirm_final" and is_admin(call.from_user.id))
     def purchase_confirm_final(call):
         user_id = call.from_user.id
+        logger.info(f"✅ Вызван purchase_confirm_final для пользователя {user_id}")
         session = purchase_sessions.pop(user_id, None)
-        if not session or not session['items']:
+        if not session:
+            logger.error(f"Сессия для пользователя {user_id} не найдена")
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+        if not session.get('items'):
+            logger.error("Нет товаров в закупке")
+            bot.answer_callback_query(call.id, "❌ Нет товаров в закупке")
             return
         total = sum(item['quantity'] * item['price_per_unit'] for item in session['items'])
         admin_seller = get_seller_by_telegram_id(ADMIN_ID)
         seller_id = admin_seller['id'] if admin_seller else None
-        purchase_id = create_purchase(seller_id, session['items'], total, comment="")
+        try:
+            purchase_id = create_purchase(seller_id, session['items'], total, comment="")
+            logger.info(f"Закупка {purchase_id} успешно создана")
+        except Exception as e:
+            logger.error(f"Ошибка при создании закупки: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка базы данных", show_alert=True)
+            return
         bot.edit_message_text(
             f"✅ Закупка №{purchase_id} успешно проведена!\n"
             f"Товары добавлены на склад хаба.",
