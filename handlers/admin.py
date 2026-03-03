@@ -1,14 +1,13 @@
-# handlers/admin.py (полный исправленный файл)
+# handlers/admin.py
 import logging
 from datetime import datetime
 from telebot import types
 from models import (
-    get_seller_by_telegram_id, get_all_products, get_seller_stock,
+    get_seller_by_telegram_id, get_all_products, get_hub_stock,
     get_all_sellers_stock, get_pending_payments, get_payment_request,
     update_payment_status, get_seller_debt, get_seller_profit,
     create_purchase, get_purchases_history, get_purchase,
-    get_total_payments_stats,  # добавлено
-    HUB_SELLER_ID, get_seller_by_id
+    get_total_payments_stats, HUB_SELLER_ID, get_seller_by_id
 )
 from config import ADMIN_ID
 from keyboards import admin_keyboard
@@ -37,7 +36,6 @@ def register_admin_handlers(bot):
             bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат.")
             return
         for p in pending:
-            # p['created_at'] уже строка, можно брать срез
             date_str = p['created_at'][:10] if p['created_at'] else 'неизвестно'
             markup = types.InlineKeyboardMarkup()
             markup.row(
@@ -113,84 +111,29 @@ def register_admin_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "📦 Остатки" and is_admin(m.from_user.id))
     def handle_admin_stock(message):
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id, name FROM sellers ORDER BY name")
-                sellers = cur.fetchall()
-        if not sellers:
-            bot.send_message(message.chat.id, "❌ Нет продавцов.")
-            return
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for s in sellers:
-            markup.add(types.InlineKeyboardButton(s['name'], callback_data=f"stock_seller_{s['id']}"))
-        markup.add(types.InlineKeyboardButton("📊 Все остатки", callback_data="stock_all"))
-        bot.send_message(
-            message.chat.id,
-            "📦 Выберите продавца или посмотрите общие остатки:",
-            reply_markup=markup
-        )
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith('stock_seller_') and is_admin(call.from_user.id))
-    def stock_seller(call):
-        seller_id = int(call.data.split('_')[2])
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT p.name, ss.quantity
-                    FROM seller_stock ss
-                    JOIN products p ON ss.product_id = p.id
-                    WHERE ss.seller_id = %s
-                    ORDER BY p.name
-                """, (seller_id,))
-                stocks = cur.fetchall()
-                cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
-                seller_name = cur.fetchone()['name']
-        if not stocks:
-            bot.edit_message_text(
-                f"📦 У продавца {seller_name} нет товаров.",
-                call.message.chat.id,
-                call.message.message_id
-            )
-            return
-        lines = []
-        for row in stocks:
-            if row['quantity'] > 0:
-                lines.append(f"• {row['name']}: {row['quantity']} шт")
-            elif row['quantity'] < 0:
-                lines.append(f"• {row['name']}: {row['quantity']} шт (❗ минус)")
-            else:
-                lines.append(f"• {row['name']}: 0 шт")
-        bot.edit_message_text(
-            f"📦 *Остатки продавца {seller_name}:*\n\n" + "\n".join(lines),
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown'
-        )
-        bot.answer_callback_query(call.id)
-
-    @bot.callback_query_handler(func=lambda call: call.data == "stock_all" and is_admin(call.from_user.id))
-    def stock_all(call):
-        stocks = get_all_sellers_stock()
-        if not stocks:
-            bot.edit_message_text("❌ Нет данных об остатках.", call.message.chat.id, call.message.message_id)
-            return
+        # Получаем остатки всех продавцов
+        all_stocks = get_all_sellers_stock()
+        # Получаем остатки хаба
+        hub_stocks = get_hub_stock()
+        # Формируем сообщение
+        text = "📊 *Общие остатки*\n\n"
+        # Сначала хаб
+        text += "*Хаб (нерасфасовано):*\n"
+        if hub_stocks:
+            for item in hub_stocks:
+                text += f"• {item['name']}: {item['quantity_kg']} кг\n"
+        else:
+            text += "• нет\n"
+        text += "\n*Продавцы:*\n"
+        # Группируем по продавцам
         sellers_dict = {}
-        for row in stocks:
-            if row['name'] not in sellers_dict:
-                sellers_dict[row['name']] = []
-            sellers_dict[row['name']].append(f"{row['product_name']}: {row['quantity']} шт")
-        text_lines = []
-        for seller_name, items in sellers_dict.items():
-            text_lines.append(f"*{seller_name}*")
-            text_lines.extend(items)
-            text_lines.append("")
-        bot.edit_message_text(
-            "📊 *Общие остатки*\n\n" + "\n".join(text_lines),
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown'
-        )
-        bot.answer_callback_query(call.id)
+        for row in all_stocks:
+            if row['seller_name'] not in sellers_dict:
+                sellers_dict[row['seller_name']] = []
+            sellers_dict[row['seller_name']].append(f"  {row['product_name']} ({row['variant_name']}): {row['quantity']} шт")
+        for seller, items in sellers_dict.items():
+            text += f"*{seller}*\n" + "\n".join(items) + "\n\n"
+        bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
     @bot.message_handler(func=lambda m: m.text == "💰 Выплаты" and is_admin(m.from_user.id))
     def handle_payments_stats(message):
@@ -201,22 +144,10 @@ def register_admin_handlers(bot):
             logger.error(f"Ошибка в handle_payments_stats: {e}")
             bot.send_message(message.chat.id, "❌ Ошибка при загрузке статистики.")
             return
-
-        # Определяем ID продавца-администратора (получателя выплат)
-        admin_seller = get_seller_by_telegram_id(ADMIN_ID)
-        exclude_seller_id = admin_seller['id'] if admin_seller else None
-
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                if exclude_seller_id:
-                    cur.execute(
-                        "SELECT id, name FROM sellers WHERE id != %s ORDER BY name",
-                        (exclude_seller_id,)
-                    )
-                else:
-                    cur.execute("SELECT id, name FROM sellers ORDER BY name")
+                cur.execute("SELECT id, name FROM sellers WHERE id != %s ORDER BY name", (HUB_SELLER_ID,))
                 sellers = cur.fetchall()
-
         msg = (
             f"💰 *Финансовая сводка*\n\n"
             f"Всего выплачено продавцами: *{total_paid} руб.*\n"
@@ -272,8 +203,6 @@ def register_admin_handlers(bot):
         try:
             history = get_purchases_history(10)
             logger.info(f"Получено {len(history)} записей истории")
-            if history:
-                logger.info(f"Первая запись: {history[0]}")
         except Exception as e:
             logger.error(f"Ошибка при получении истории закупок: {e}")
             bot.answer_callback_query(call.id, "❌ Ошибка базы данных")
@@ -291,7 +220,6 @@ def register_admin_handlers(bot):
             date_str = str(h['purchase_date'])[:10]
             btn_text = f"{date_str} – {h['total']} руб."
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"purchase_view_{h['id']}"))
-        logger.info(f"Создано {len(history)} кнопок")
         try:
             bot.edit_message_text(
                 "📜 *История закупок*\n\nВыберите запись:",
@@ -300,7 +228,6 @@ def register_admin_handlers(bot):
                 parse_mode='Markdown',
                 reply_markup=markup
             )
-            logger.info("Сообщение с историей успешно отредактировано")
         except Exception as e:
             logger.error(f"Ошибка при редактировании сообщения: {e}")
             bot.send_message(
@@ -327,7 +254,7 @@ def register_admin_handlers(bot):
                 bot.answer_callback_query(call.id, "❌ Закупка не найдена")
                 return
             date_str = str(purchase['purchase_date'])[:10] if purchase['purchase_date'] else 'неизвестно'
-            items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт (по {item['price_per_unit']} руб.)" for item in purchase['items']])
+            items_text = "\n".join([f"• {item['name']}: {item['quantity_kg']} кг (по {item['price_per_kg']} руб./кг)" for item in purchase['items']])
             msg = (
                 f"📦 *Закупка от {date_str}*\n\n"
                 f"{items_text}\n\n"
@@ -366,7 +293,7 @@ def register_admin_handlers(bot):
             'message_id': call.message.message_id,
             'chat_id': call.message.chat.id
         }
-        show_product_list(user_id)
+        show_product_list_for_purchase(user_id)
 
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_force_new" and is_admin(call.from_user.id))
     def purchase_force_new(call):
@@ -376,9 +303,9 @@ def register_admin_handlers(bot):
             'message_id': call.message.message_id,
             'chat_id': call.message.chat.id
         }
-        show_product_list(user_id)
+        show_product_list_for_purchase(user_id)
 
-    def show_product_list(user_id):
+    def show_product_list_for_purchase(user_id):
         session = purchase_sessions.get(user_id)
         if not session:
             return
@@ -388,7 +315,7 @@ def register_admin_handlers(bot):
             markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
         markup.add(types.InlineKeyboardButton("🔙 Отмена", callback_data="purchase_abort"))
         bot.edit_message_text(
-            "🛒 *Выберите товар для закупки:*",
+            "🛒 *Закупка товаров (в кг)*\n\nВыберите товар:",
             session['chat_id'],
             session['message_id'],
             parse_mode='Markdown',
@@ -407,7 +334,7 @@ def register_admin_handlers(bot):
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
         bot.edit_message_text(
-            f"Введите количество для *{product_name}*:",
+            f"Введите количество килограммов для *{product_name}*:",
             call.message.chat.id,
             call.message.message_id,
             parse_mode='Markdown'
@@ -421,56 +348,39 @@ def register_admin_handlers(bot):
             bot.reply_to(message, "❌ Сессия истекла. Начните заново.")
             return
         try:
-            qty = int(message.text.strip())
-            if qty <= 0:
+            qty_kg = float(message.text.strip().replace(',', '.'))
+            if qty_kg <= 0:
                 raise ValueError
         except:
-            bot.reply_to(message, "❌ Введите положительное целое число.")
-            show_product_list(user_id)
+            bot.reply_to(message, "❌ Введите положительное число (килограммы).")
+            show_product_list_for_purchase(user_id)
             return
-        products = get_all_products()
-        product = next((p for p in products if p['id'] == product_id), None)
-        if not product:
-            bot.reply_to(message, "❌ Товар не найден")
-            return
-        price = product.get('purchase_price', 0)
-        if price == 0:
-            bot.reply_to(message, "❌ У товара не указана закупочная цена. Сначала установите её в базе.")
-            return
-        session['temp_qty'] = qty
-        session['temp_price'] = price
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"purchase_confirm_item_{product_id}"),
-            types.InlineKeyboardButton("✏️ Изменить", callback_data=f"purchase_change_item_{product_id}"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data="purchase_cancel_item")
-        )
+        session['temp_qty'] = qty_kg
         bot.send_message(
             session['chat_id'],
-            f"Вы купили *{product['name']}* – *{qty}* упаковок?",
-            parse_mode='Markdown',
-            reply_markup=markup
+            f"Введите закупочную цену за 1 кг (руб.):"
         )
+        bot.register_next_step_handler_by_chat_id(session['chat_id'], process_purchase_price, user_id, product_id)
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith('purchase_confirm_item_') and is_admin(call.from_user.id))
-    def purchase_confirm_item(call):
-        user_id = call.from_user.id
-        product_id = int(call.data.split('_')[3])
+    def process_purchase_price(message, user_id, product_id):
         session = purchase_sessions.get(user_id)
         if not session:
-            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            bot.reply_to(message, "❌ Сессия истекла")
             return
-        qty = session.pop('temp_qty', None)
-        price = session.pop('temp_price', None)
-        if qty is None or price is None:
-            bot.answer_callback_query(call.id, "❌ Ошибка данных")
+        try:
+            price_per_kg = int(message.text.strip())
+            if price_per_kg <= 0:
+                raise ValueError
+        except:
+            bot.reply_to(message, "❌ Введите целое положительное число.")
+            show_product_list_for_purchase(user_id)
             return
+        qty_kg = session.pop('temp_qty')
         session['items'].append({
             'product_id': product_id,
-            'quantity': qty,
-            'price_per_unit': price
+            'quantity_kg': qty_kg,
+            'price_per_kg': price_per_kg
         })
-        bot.delete_message(session['chat_id'], call.message.message_id)
         show_purchase_summary(user_id)
 
     def show_purchase_summary(user_id):
@@ -479,11 +389,11 @@ def register_admin_handlers(bot):
             return
         products = get_all_products()
         product_dict = {p['id']: p['name'] for p in products}
-        total = sum(item['quantity'] * item['price_per_unit'] for item in session['items'])
+        total = sum(item['quantity_kg'] * item['price_per_kg'] for item in session['items'])
         lines = []
         for item in session['items']:
             name = product_dict.get(item['product_id'], f"Товар {item['product_id']}")
-            lines.append(f"{name} – {item['quantity']} шт (по {item['price_per_unit']} руб.)")
+            lines.append(f"{name} – {item['quantity_kg']} кг (по {item['price_per_kg']} руб./кг)")
         summary = "\n".join(lines)
         markup = types.InlineKeyboardMarkup()
         markup.row(
@@ -525,83 +435,14 @@ def register_admin_handlers(bot):
         show_purchase_summary(user_id)
         bot.answer_callback_query(call.id)
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith('purchase_change_item_') and is_admin(call.from_user.id))
-    def purchase_change_item(call):
-        user_id = call.from_user.id
-        product_id = int(call.data.split('_')[3])
-        session = purchase_sessions.get(user_id)
-        if not session:
-            bot.answer_callback_query(call.id, "❌ Сессия истекла")
-            return
-        bot.delete_message(session['chat_id'], call.message.message_id)
-        products = get_all_products()
-        product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
-        bot.send_message(
-            session['chat_id'],
-            f"Введите количество для *{product_name}*:",
-            parse_mode='Markdown'
-        )
-        bot.register_next_step_handler_by_chat_id(session['chat_id'], process_purchase_quantity, user_id, product_id)
-        bot.answer_callback_query(call.id)
-
-    @bot.callback_query_handler(func=lambda call: call.data == "purchase_cancel_item" and is_admin(call.from_user.id))
-    def purchase_cancel_item(call):
-        user_id = call.from_user.id
-        session = purchase_sessions.get(user_id)
-        if not session:
-            bot.answer_callback_query(call.id, "❌ Сессия истекла")
-            return
-        bot.delete_message(session['chat_id'], call.message.message_id)
-        show_purchase_summary(user_id)
-        bot.answer_callback_query(call.id)
-
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_finish" and is_admin(call.from_user.id))
     def purchase_finish(call):
         user_id = call.from_user.id
-        session = purchase_sessions.get(user_id)
+        session = purchase_sessions.pop(user_id, None)
         if not session or not session['items']:
             bot.answer_callback_query(call.id, "❌ Нет товаров в закупке")
             return
-        products = get_all_products()
-        product_dict = {p['id']: p['name'] for p in products}
-        total = sum(item['quantity'] * item['price_per_unit'] for item in session['items'])
-        lines = []
-        for item in session['items']:
-            name = product_dict.get(item['product_id'], f"Товар {item['product_id']}")
-            lines.append(f"{name} – {item['quantity']} шт (по {item['price_per_unit']} руб.)")
-        summary = "\n".join(lines)
-        markup = types.InlineKeyboardMarkup()
-        markup.row(
-            types.InlineKeyboardButton("✅ Подтвердить закупку", callback_data="purchase_confirm_final"),
-            types.InlineKeyboardButton("➕ Добавить товар", callback_data="purchase_add_item"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data="purchase_abort")
-        )
-        bot.edit_message_text(
-            f"📦 *Закупка от {datetime.now().strftime('%d %B')}*\n\n"
-            f"{summary}\n\n"
-            f"Итого: *{total} руб.*\n\n"
-            f"Отметьте еще товар или завершите закупку:",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
-        bot.answer_callback_query(call.id)
-
-    @bot.callback_query_handler(func=lambda call: call.data == "purchase_confirm_final" and is_admin(call.from_user.id))
-    def purchase_confirm_final(call):
-        user_id = call.from_user.id
-        logger.info(f"✅ Вызван purchase_confirm_final для пользователя {user_id}")
-        session = purchase_sessions.pop(user_id, None)
-        if not session:
-            logger.error(f"Сессия для пользователя {user_id} не найдена")
-            bot.answer_callback_query(call.id, "❌ Сессия истекла")
-            return
-        if not session.get('items'):
-            logger.error("Нет товаров в закупке")
-            bot.answer_callback_query(call.id, "❌ Нет товаров в закупке")
-            return
-        total = sum(item['quantity'] * item['price_per_unit'] for item in session['items'])
+        total = sum(item['quantity_kg'] * item['price_per_kg'] for item in session['items'])
         admin_seller = get_seller_by_telegram_id(ADMIN_ID)
         seller_id = admin_seller['id'] if admin_seller else None
         try:
@@ -612,8 +453,7 @@ def register_admin_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Ошибка базы данных", show_alert=True)
             return
         bot.edit_message_text(
-            f"✅ Закупка №{purchase_id} успешно проведена!\n"
-            f"Товары добавлены на склад хаба.",
+            f"✅ Закупка №{purchase_id} успешно проведена!\nТовары добавлены на склад хаба.",
             call.message.chat.id,
             call.message.message_id
         )
