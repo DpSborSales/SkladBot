@@ -10,7 +10,7 @@ from config import HUB_SELLER_ID
 
 logger = logging.getLogger(__name__)
 
-transfer_sessions = {}
+transfer_sessions = {}  # user_id -> session data
 
 def register_transfer_handlers(bot):
     @bot.message_handler(func=lambda m: m.text == "🔄 Заявка на перемещение")
@@ -21,7 +21,7 @@ def register_transfer_handlers(bot):
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
 
-        # Если это кладовщик – показываем заглушку
+        # Если это кладовщик – показываем информационное сообщение
         if seller['id'] == HUB_SELLER_ID:
             bot.reply_to(
                 message,
@@ -30,19 +30,83 @@ def register_transfer_handlers(bot):
             )
             return
 
-        # Обычный продавец – создание заявки
+        # Обычный продавец – начинаем новую сессию
+        if user_id in transfer_sessions:
+            # Если сессия уже есть, предлагаем продолжить или начать заново
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Продолжить текущую", callback_data="transfer_continue"),
+                types.InlineKeyboardButton("🔄 Новая заявка", callback_data="transfer_new")
+            )
+            bot.send_message(
+                message.chat.id,
+                "⚠️ У вас уже есть незавершённая заявка. Выберите действие:",
+                reply_markup=markup
+            )
+            return
+
+        # Новая сессия
+        transfer_sessions[user_id] = {
+            'seller_id': seller['id'],
+            'items': [],          # список словарей {'product_id': id, 'quantity': qty, 'name': name}
+            'message_id': None,
+            'chat_id': message.chat.id
+        }
+        show_product_selection(user_id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_continue")
+    def transfer_continue(call):
+        user_id = call.from_user.id
+        if user_id not in transfer_sessions:
+            bot.answer_callback_query(call.id, "❌ Сессия не найдена")
+            return
+        show_product_selection(user_id)
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_new")
+    def transfer_new(call):
+        user_id = call.from_user.id
+        seller = get_seller_by_telegram_id(user_id)
+        if not seller:
+            bot.answer_callback_query(call.id, "❌ Ошибка доступа")
+            return
+        transfer_sessions[user_id] = {
+            'seller_id': seller['id'],
+            'items': [],
+            'message_id': None,
+            'chat_id': call.message.chat.id
+        }
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        show_product_selection(user_id)
+        bot.answer_callback_query(call.id)
+
+    def show_product_selection(user_id):
+        session = transfer_sessions.get(user_id)
+        if not session:
+            return
+
         products = get_all_products()
         if not products:
-            bot.reply_to(message, "❌ Нет товаров в каталоге.")
+            bot.send_message(session['chat_id'], "❌ Нет товаров в каталоге.")
             return
+
         markup = types.InlineKeyboardMarkup(row_width=2)
-        buttons = []
         for p in products:
-            buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"transfer_prod_{p['id']}"))
-        markup.add(*buttons)
+            markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"transfer_prod_{p['id']}"))
+        markup.add(types.InlineKeyboardButton("📋 Просмотреть заявку", callback_data="transfer_show_summary"))
+        markup.add(types.InlineKeyboardButton("❌ Отменить", callback_data="transfer_cancel"))
+
+        text = "🔄 *Создание заявки на перемещение*\n\nВыберите товар, который хотите получить:"
+        if session['items']:
+            # Показываем уже добавленные товары
+            lines = []
+            for item in session['items']:
+                lines.append(f"• {item['name']}: {item['quantity']} шт")
+            text += "\n\n*Добавлено:*\n" + "\n".join(lines)
+
         bot.send_message(
-            message.chat.id,
-            "🔄 *Создание заявки на перемещение*\n\nВыберите товар, который хотите получить:",
+            session['chat_id'],
+            text,
             parse_mode='Markdown',
             reply_markup=markup
         )
@@ -51,64 +115,222 @@ def register_transfer_handlers(bot):
     def transfer_product_selected(call):
         user_id = call.from_user.id
         product_id = int(call.data.split('_')[2])
-        seller = get_seller_by_telegram_id(user_id)
-        if not seller or seller['id'] == HUB_SELLER_ID:
-            bot.answer_callback_query(call.id, "❌ Ошибка доступа")
+        session = transfer_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
-        transfer_sessions[user_id] = {
-            'product_id': product_id,
-            'chat_id': call.message.chat.id,
-            'message_id': call.message.message_id
-        }
+
+        session['current_product'] = product_id
+        products = get_all_products()
+        product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+
         bot.edit_message_text(
-            f"Введите количество для товара:",
+            f"Введите количество для товара *{product_name}*:",
             call.message.chat.id,
-            call.message.message_id
+            call.message.message_id,
+            parse_mode='Markdown'
         )
         bot.register_next_step_handler_by_chat_id(call.message.chat.id, process_transfer_quantity, user_id, product_id)
         bot.answer_callback_query(call.id)
 
     def process_transfer_quantity(message, user_id, product_id):
-        session = transfer_sessions.pop(user_id, None)
+        session = transfer_sessions.get(user_id)
         if not session:
             bot.reply_to(message, "❌ Сессия истекла. Начните заново.")
             return
+
         try:
             qty = int(message.text.strip())
             if qty <= 0:
                 raise ValueError
         except:
             bot.reply_to(message, "❌ Введите положительное целое число.")
+            show_product_selection(user_id)
             return
-        seller = get_seller_by_telegram_id(user_id)
-        if not seller or seller['id'] == HUB_SELLER_ID:
-            bot.reply_to(message, "❌ Ошибка доступа.")
+
+        products = get_all_products()
+        product = next((p for p in products if p['id'] == product_id), None)
+        if not product:
+            bot.reply_to(message, "❌ Товар не найден")
             return
-        request_id = create_transfer_request(seller['id'], product_id, qty)
+
+        # Сохраняем во временные переменные
+        session['temp_qty'] = qty
+        session['temp_product'] = product
+
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_confirm_item_{product_id}"),
+            types.InlineKeyboardButton("✏️ Изменить", callback_data=f"transfer_change_item_{product_id}"),
+            types.InlineKeyboardButton("❌ Отмена", callback_data="transfer_cancel_item")
+        )
+        bot.send_message(
+            session['chat_id'],
+            f"Добавить *{product['name']}* – *{qty}* упаковок в заявку?",
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_confirm_item_'))
+    def transfer_confirm_item(call):
+        user_id = call.from_user.id
+        product_id = int(call.data.split('_')[3])
+        session = transfer_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+
+        qty = session.pop('temp_qty', None)
+        product = session.pop('temp_product', None)
+        if qty is None or product is None:
+            bot.answer_callback_query(call.id, "❌ Ошибка данных")
+            return
+
+        # Проверяем, есть ли уже такой товар в заявке
+        existing = next((item for item in session['items'] if item['product_id'] == product_id), None)
+        if existing:
+            existing['quantity'] += qty
+        else:
+            session['items'].append({
+                'product_id': product_id,
+                'name': product['name'],
+                'quantity': qty
+            })
+
+        bot.delete_message(session['chat_id'], call.message.message_id)
+        show_product_selection(user_id)
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_change_item_'))
+    def transfer_change_item(call):
+        user_id = call.from_user.id
+        product_id = int(call.data.split('_')[3])
+        session = transfer_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+
+        bot.delete_message(session['chat_id'], call.message.message_id)
+        products = get_all_products()
+        product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+        bot.send_message(
+            session['chat_id'],
+            f"Введите новое количество для товара *{product_name}*:",
+            parse_mode='Markdown'
+        )
+        bot.register_next_step_handler_by_chat_id(session['chat_id'], process_transfer_quantity, user_id, product_id)
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_cancel_item")
+    def transfer_cancel_item(call):
+        user_id = call.from_user.id
+        session = transfer_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+        bot.delete_message(session['chat_id'], call.message.message_id)
+        show_product_selection(user_id)
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_show_summary")
+    def transfer_show_summary(call):
+        user_id = call.from_user.id
+        session = transfer_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+
+        if not session['items']:
+            bot.answer_callback_query(call.id, "❌ Нет добавленных товаров")
+            return
+
+        lines = [f"• {item['name']}: {item['quantity']} шт" for item in session['items']]
+        summary = "\n".join(lines)
+
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("✅ Отправить заявку", callback_data="transfer_submit"),
+            types.InlineKeyboardButton("➕ Добавить товар", callback_data="transfer_add_more"),
+            types.InlineKeyboardButton("❌ Отменить", callback_data="transfer_cancel")
+        )
+
+        bot.edit_message_text(
+            f"📦 *Состав заявки*\n\n{summary}\n\nПодтвердите отправку:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_add_more")
+    def transfer_add_more(call):
+        user_id = call.from_user.id
+        session = transfer_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+        bot.delete_message(session['chat_id'], call.message.message_id)
+        show_product_selection(user_id)
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_submit")
+    def transfer_submit(call):
+        user_id = call.from_user.id
+        session = transfer_sessions.pop(user_id, None)
+        if not session or not session['items']:
+            bot.answer_callback_query(call.id, "❌ Нет товаров в заявке")
+            return
+
+        seller = get_seller_by_id(session['seller_id'])
+        # Создаём заявку в БД
+        items_for_db = [{'product_id': item['product_id'], 'quantity': item['quantity']} for item in session['items']]
+        request_id = create_transfer_request(session['seller_id'], items_for_db)
+
+        # Отправляем уведомление кладовщику
         hub_seller = get_seller_by_id(HUB_SELLER_ID)
         if hub_seller:
+            lines = [f"• {item['name']}: {item['quantity']} шт" for item in session['items']]
+            items_text = "\n".join(lines)
+
             markup = types.InlineKeyboardMarkup()
             markup.row(
                 types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{request_id}"),
                 types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{request_id}")
             )
-            products = get_all_products()
-            product_name = next((p['name'] for p in products if p['id'] == product_id), f"Товар {product_id}")
+
             try:
                 bot.send_message(
                     hub_seller['telegram_id'],
                     f"📦 *Новая заявка на перемещение*\n\n"
-                    f"От: {seller['name']}\n"
-                    f"Товар: {product_name}\n"
-                    f"Количество: {qty}",
+                    f"Продавец: {seller['name']}\n"
+                    f"Запрашивает:\n{items_text}",
                     parse_mode='Markdown',
                     reply_markup=markup
                 )
                 logger.info(f"Заявка {request_id} отправлена кладовщику")
             except Exception as e:
                 logger.error(f"Ошибка отправки кладовщику: {e}")
-        bot.reply_to(message, f"✅ Заявка на перемещение создана (№{request_id}). Ожидайте подтверждения.")
 
+        bot.edit_message_text(
+            f"✅ Заявка №{request_id} отправлена кладовщику. Ожидайте подтверждения.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.answer_callback_query(call.id, "✅ Заявка отправлена")
+
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_cancel")
+    def transfer_cancel(call):
+        user_id = call.from_user.id
+        transfer_sessions.pop(user_id, None)
+        bot.edit_message_text(
+            "❌ Создание заявки отменено.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.answer_callback_query(call.id)
+
+    # Обработчики для кладовщика (подтверждение/отклонение)
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
     def approve_transfer(call):
         user_id = call.from_user.id
@@ -116,6 +338,7 @@ def register_transfer_handlers(bot):
         if not seller or seller['id'] != HUB_SELLER_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав для подтверждения.")
             return
+
         request_id = int(call.data.split('_')[2])
         req = get_transfer_request(request_id)
         if not req:
@@ -124,39 +347,65 @@ def register_transfer_handlers(bot):
         if req['status'] != 'pending':
             bot.answer_callback_query(call.id, f"✅ Заявка уже {req['status']}")
             return
+
+        # Проверяем наличие всех товаров на складе хаба
+        insufficient = []
+        for item in req['items']:
+            # Получаем текущий остаток хаба
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s",
+                        (HUB_SELLER_ID, item['product_id'])
+                    )
+                    stock = cur.fetchone()
+                    if not stock or stock['quantity'] < item['quantity']:
+                        insufficient.append(f"{item['product_name']} (доступно {stock['quantity'] if stock else 0}, требуется {item['quantity']})")
+
+        if insufficient:
+            bot.answer_callback_query(
+                call.id,
+                "❌ Недостаточно товара на хабе:\n" + "\n".join(insufficient),
+                show_alert=True
+            )
+            return
+
+        # Выполняем перемещение
         try:
-            decrease_seller_stock(
-                seller_id=HUB_SELLER_ID,
-                product_id=req['product_id'],
-                quantity=req['quantity'],
-                reason='transfer_out',
-                order_id=None
-            )
-            increase_seller_stock(
-                seller_id=req['to_seller_id'],
-                product_id=req['product_id'],
-                quantity=req['quantity'],
-                reason='transfer_in',
-                order_id=None
-            )
+            for item in req['items']:
+                decrease_seller_stock(
+                    seller_id=HUB_SELLER_ID,
+                    product_id=item['product_id'],
+                    quantity=item['quantity'],
+                    reason='transfer_out',
+                    order_id=None
+                )
+                increase_seller_stock(
+                    seller_id=req['to_seller_id'],
+                    product_id=item['product_id'],
+                    quantity=item['quantity'],
+                    reason='transfer_in',
+                    order_id=None
+                )
         except Exception as e:
             logger.error(f"Ошибка при перемещении: {e}")
-            bot.answer_callback_query(call.id, "❌ Ошибка при перемещении (возможно, недостаточно товара на хабе).", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ Ошибка при перемещении", show_alert=True)
             return
+
         update_transfer_request_status(request_id, 'approved')
+
+        # Уведомляем продавца
         seller_to = get_seller_by_id(req['to_seller_id'])
         if seller_to:
             try:
-                products = get_all_products()
-                product_name = next((p['name'] for p in products if p['id'] == req['product_id']), f"Товар {req['product_id']}")
                 bot.send_message(
                     seller_to['telegram_id'],
                     f"✅ Ваша заявка на перемещение (№{request_id}) подтверждена!\n"
-                    f"Товар: {product_name}\n"
-                    f"Количество: {req['quantity']}"
+                    f"Товары поступили на ваш склад."
                 )
             except Exception as e:
                 logger.error(f"Ошибка уведомления продавца: {e}")
+
         bot.edit_message_text(
             f"✅ Заявка {request_id} подтверждена, перемещение выполнено.",
             call.message.chat.id,
@@ -171,6 +420,7 @@ def register_transfer_handlers(bot):
         if not seller or seller['id'] != HUB_SELLER_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
+
         request_id = int(call.data.split('_')[2])
         req = get_transfer_request(request_id)
         if not req:
@@ -179,20 +429,19 @@ def register_transfer_handlers(bot):
         if req['status'] != 'pending':
             bot.answer_callback_query(call.id, f"✅ Заявка уже {req['status']}")
             return
+
         update_transfer_request_status(request_id, 'rejected')
+
         seller_to = get_seller_by_id(req['to_seller_id'])
         if seller_to:
             try:
-                products = get_all_products()
-                product_name = next((p['name'] for p in products if p['id'] == req['product_id']), f"Товар {req['product_id']}")
                 bot.send_message(
                     seller_to['telegram_id'],
-                    f"❌ Ваша заявка на перемещение (№{request_id}) отклонена кладовщиком.\n"
-                    f"Товар: {product_name}\n"
-                    f"Количество: {req['quantity']}"
+                    f"❌ Ваша заявка на перемещение (№{request_id}) отклонена кладовщиком."
                 )
             except Exception as e:
                 logger.error(f"Ошибка уведомления продавца: {e}")
+
         bot.edit_message_text(
             f"❌ Заявка {request_id} отклонена.",
             call.message.chat.id,
@@ -200,7 +449,7 @@ def register_transfer_handlers(bot):
         )
         bot.answer_callback_query(call.id, "✅ Заявка отклонена")
 
-    # Обработчик инлайн-кнопки из предупреждения о минусах (оставляем как есть)
+    # Обработчик кнопки из предупреждения о минусах
     @bot.callback_query_handler(func=lambda call: call.data == "create_transfer_request")
     def handle_create_transfer_request(call):
         user_id = call.from_user.id
@@ -208,21 +457,18 @@ def register_transfer_handlers(bot):
         if not seller or seller['id'] == HUB_SELLER_ID:
             bot.answer_callback_query(call.id, "❌ Ошибка доступа")
             return
-        # Запускаем процесс создания заявки (выбор товара)
-        products = get_all_products()
-        if not products:
-            bot.answer_callback_query(call.id, "❌ Нет товаров в каталоге.")
-            return
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        buttons = []
-        for p in products:
-            buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"transfer_prod_{p['id']}"))
-        markup.add(*buttons)
+
+        # Начинаем новую сессию
+        transfer_sessions[user_id] = {
+            'seller_id': seller['id'],
+            'items': [],
+            'message_id': None,
+            'chat_id': call.message.chat.id
+        }
         bot.edit_message_text(
-            "🔄 *Создание заявки на перемещение*\n\nВыберите товар, который хотите получить:",
+            "🔄 Начинаем создание заявки на перемещение...",
             call.message.chat.id,
-            call.message.message_id,
-            parse_mode='Markdown',
-            reply_markup=markup
+            call.message.message_id
         )
+        show_product_selection(user_id)
         bot.answer_callback_query(call.id)
