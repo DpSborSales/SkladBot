@@ -99,14 +99,13 @@ def register_edit_handlers(bot):
         products = get_all_products()
         product_dict = {p['id']: p['name'] for p in products}
 
-        # Формируем сводку выбранных товаров с красивыми названиями
+        # Формируем сводку выбранных товаров (только с положительным количеством)
         selected_lines = []
         for (pid, vid), qty in session['selected_items'].items():
+            if qty <= 0:
+                continue
             variant = get_variant(vid)
-            if variant:
-                variant_name = variant['name']
-            else:
-                variant_name = "Неизвестный вариант"
+            variant_name = variant['name'] if variant else "Неизвестный вариант"
             product_name = product_dict.get(pid, "Неизвестный товар")
             selected_lines.append(f"{product_name} ({variant_name}): {qty} шт")
         summary = "\n".join(selected_lines)
@@ -237,10 +236,16 @@ def register_edit_handlers(bot):
             show_product_selection(user_id)
             return
 
-        # Сохраняем выбранное количество для конкретного варианта
         key = (product_id, variant_id)
-        session['selected_items'][key] = qty
-        logger.info(f"✅ Количество для варианта {variant_id} установлено: {qty}")
+        if qty == 0:
+            # Если количество 0, удаляем позицию из выбранных (если она там была)
+            if key in session['selected_items']:
+                del session['selected_items'][key]
+                logger.info(f"✅ Позиция {key} удалена (количество 0)")
+        else:
+            # Иначе сохраняем
+            session['selected_items'][key] = qty
+            logger.info(f"✅ Количество для варианта {variant_id} установлено: {qty}")
 
         # Возвращаемся к списку товаров
         show_product_selection(user_id)
@@ -256,7 +261,9 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
 
-        if not session['selected_items']:
+        # Фильтруем только позиции с положительным количеством
+        positive_items = {k: v for k, v in session['selected_items'].items() if v > 0}
+        if not positive_items:
             markup = types.InlineKeyboardMarkup()
             markup.row(
                 types.InlineKeyboardButton("✅ Без изменений", callback_data=f"nochanges_{order_num}"),
@@ -276,7 +283,7 @@ def register_edit_handlers(bot):
         products = get_all_products()
         product_dict = {p['id']: p['name'] for p in products}
         lines = []
-        for (pid, vid), qty in session['selected_items'].items():
+        for (pid, vid), qty in positive_items.items():
             variant = get_variant(vid)
             variant_name = variant['name'] if variant else "Неизвестный вариант"
             product_name = product_dict.get(pid, "Неизвестный товар")
@@ -326,7 +333,8 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
             return
 
-        selected = session['selected_items']
+        # Берём только позиции с положительным количеством
+        selected = {k: v for k, v in session['selected_items'].items() if v > 0}
         if not selected:
             bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
             return
