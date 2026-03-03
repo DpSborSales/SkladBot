@@ -141,13 +141,12 @@ def register_direct_sale_handlers(bot):
         session = direct_sale_sessions.get(user_id)
         if not session:
             return
-        items = session['items'].values()
+        items = list(session['items'].values())
         if not items:
             show_product_list(user_id)
             return
 
         total_buyer = sum(i['quantity'] * i['price'] for i in items)
-        total_seller = sum(i['quantity'] * i['price_seller'] for i in items)
 
         lines = []
         for item in items:
@@ -163,8 +162,7 @@ def register_direct_sale_handlers(bot):
         bot.send_message(
             session['chat_id'],
             f"📦 *Продажа*\n\n{summary}\n\n"
-            f"Итого (покупатель): *{total_buyer} руб.*\n"
-            f"Итого (продавец): *{total_seller} руб.*\n\n"
+            f"Итого: *{total_buyer} руб.*\n\n"
             "Подтвердить?",
             parse_mode='Markdown',
             reply_markup=markup
@@ -210,16 +208,29 @@ def register_direct_sale_handlers(bot):
         seller_id = session['seller_id']
         total_buyer = sum(i['quantity'] * i['price'] for i in items)
 
-        for item in items:
-            decrease_seller_stock(
-                seller_id=seller_id,
-                variant_id=item['variant_id'],
-                quantity=item['quantity'],
-                reason='sale',
-                order_id=None
-            )
+        try:
+            # Списываем товары со склада
+            for item in items:
+                decrease_seller_stock(
+                    seller_id=seller_id,
+                    variant_id=item['variant_id'],
+                    quantity=item['quantity'],
+                    reason='sale',
+                    order_id=None
+                )
+                logger.info(f"✅ Списано {item['quantity']} ед. variant {item['variant_id']}")
+        except Exception as e:
+            logger.exception(f"Ошибка при списании: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка при списании товаров", show_alert=True)
+            return
 
-        sale_id = create_direct_sale(seller_id, items, total_buyer)
+        try:
+            sale_id = create_direct_sale(seller_id, items, total_buyer)
+            logger.info(f"✅ Продажа №{sale_id} сохранена")
+        except Exception as e:
+            logger.exception(f"Ошибка при сохранении продажи: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка базы данных", show_alert=True)
+            return
 
         bot.edit_message_text(
             f"✅ Продажа №{sale_id} зафиксирована!\nТовары списаны со склада.",
