@@ -201,10 +201,22 @@ def register_admin_handlers(bot):
             logger.error(f"Ошибка в handle_payments_stats: {e}")
             bot.send_message(message.chat.id, "❌ Ошибка при загрузке статистики.")
             return
+
+        # Определяем ID продавца-администратора (получателя выплат)
+        admin_seller = get_seller_by_telegram_id(ADMIN_ID)
+        exclude_seller_id = admin_seller['id'] if admin_seller else None
+
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, name FROM sellers WHERE id != %s ORDER BY name", (HUB_SELLER_ID,))
+                if exclude_seller_id:
+                    cur.execute(
+                        "SELECT id, name FROM sellers WHERE id != %s ORDER BY name",
+                        (exclude_seller_id,)
+                    )
+                else:
+                    cur.execute("SELECT id, name FROM sellers ORDER BY name")
                 sellers = cur.fetchall()
+
         msg = (
             f"💰 *Финансовая сводка*\n\n"
             f"Всего выплачено продавцами: *{total_paid} руб.*\n"
