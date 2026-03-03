@@ -3,7 +3,7 @@ from telebot import types
 from models import (
     get_order_by_number, get_seller_by_telegram_id, get_all_products,
     get_product_variants, decrease_seller_stock, mark_order_as_processed,
-    get_negative_stock_summary
+    get_negative_stock_summary, get_variant
 )
 from notifications import send_negative_stock_warning
 
@@ -78,7 +78,7 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
             return
 
-        # Сохраняем только номер заказа и ID продавца, исходные items не нужны
+        # Сохраняем только номер заказа и ID продавца
         edit_sessions[user_id] = {
             'order_number': order_num,
             'seller_id': seller['id'],
@@ -97,6 +97,20 @@ def register_edit_handlers(bot):
             return
 
         products = get_all_products()
+        product_dict = {p['id']: p['name'] for p in products}
+
+        # Формируем сводку выбранных товаров с красивыми названиями
+        selected_lines = []
+        for (pid, vid), qty in session['selected_items'].items():
+            variant = get_variant(vid)
+            if variant:
+                variant_name = variant['name']
+            else:
+                variant_name = "Неизвестный вариант"
+            product_name = product_dict.get(pid, "Неизвестный товар")
+            selected_lines.append(f"{product_name} ({variant_name}): {qty} шт")
+        summary = "\n".join(selected_lines)
+
         markup = types.InlineKeyboardMarkup(row_width=2)
         buttons = []
         for p in products:
@@ -106,13 +120,6 @@ def register_edit_handlers(bot):
             ))
         markup.add(*buttons)
         markup.row(types.InlineKeyboardButton("✅ Завершить", callback_data=f"finish_{session['order_number']}"))
-
-        # Можно показать уже выбранные позиции (опционально)
-        selected_summary = []
-        for (pid, vid), qty in session['selected_items'].items():
-            # Для краткости просто покажем pid, vid (можно улучшить)
-            selected_summary.append(f"Товар {pid} вар.{vid}: {qty} шт")
-        summary = "\n".join(selected_summary)
 
         text = f"✏️ *Редактирование заказа {session['order_number']}*\n\n"
         if summary:
@@ -185,8 +192,6 @@ def register_edit_handlers(bot):
         session['current_product'] = product_id
         session['current_variant'] = variant_id
 
-        # Получаем название варианта из БД
-        from models import get_variant
         variant = get_variant(variant_id)
         variant_name = variant['name'] if variant else "Неизвестный вариант"
         products = get_all_products()
@@ -269,14 +274,13 @@ def register_edit_handlers(bot):
 
         # Формируем итоговый список для подтверждения
         products = get_all_products()
-        product_names = {p['id']: p['name'] for p in products}
+        product_dict = {p['id']: p['name'] for p in products}
         lines = []
         for (pid, vid), qty in session['selected_items'].items():
-            from models import get_variant
             variant = get_variant(vid)
             variant_name = variant['name'] if variant else "Неизвестный вариант"
-            name = f"{product_names.get(pid, 'Товар')} ({variant_name})"
-            lines.append(f"• {name}: {qty} упаковок")
+            product_name = product_dict.get(pid, "Неизвестный товар")
+            lines.append(f"• {product_name} ({variant_name}): {qty} упаковок")
         summary = "\n".join(lines)
 
         markup = types.InlineKeyboardMarkup()
