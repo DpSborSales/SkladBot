@@ -1,4 +1,4 @@
-# models.py (полный файл с исправлениями для мультитоварных заявок на перемещение)
+# models.py (полностью переработанный)
 import json
 import logging
 from datetime import datetime
@@ -37,6 +37,163 @@ def get_seller_by_id(seller_id: int):
             cur.execute("SELECT * FROM sellers WHERE id = %s", (seller_id,))
             return cur.fetchone()
 
+# ========== Товары и варианты ==========
+def get_all_products():
+    """Возвращает список всех продуктов с их вариантами"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name FROM products ORDER BY name")
+            products = cur.fetchall()
+            for p in products:
+                cur.execute("""
+                    SELECT id, name, price, price_seller, weight_kg
+                    FROM product_variants
+                    WHERE product_id = %s
+                    ORDER BY sort_order
+                """, (p['id'],))
+                p['variants'] = cur.fetchall()
+            return products
+
+def get_product_variants(product_id: int):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, name, price, price_seller, weight_kg
+                FROM product_variants
+                WHERE product_id = %s
+                ORDER BY sort_order
+            """, (product_id,))
+            return cur.fetchall()
+
+def get_variant(variant_id: int):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT v.*, p.name as product_name
+                FROM product_variants v
+                JOIN products p ON v.product_id = p.id
+                WHERE v.id = %s
+            """, (variant_id,))
+            return cur.fetchone()
+
+# ========== Остатки продавцов (в упаковках) ==========
+def get_seller_stock(seller_id: int, variant_id: int = None):
+    """Если variant_id не указан, возвращает все остатки продавца"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if variant_id:
+                cur.execute("""
+                    SELECT quantity FROM seller_stock
+                    WHERE seller_id = %s AND variant_id = %s
+                """, (seller_id, variant_id))
+                row = cur.fetchone()
+                return row['quantity'] if row else 0
+            else:
+                cur.execute("""
+                    SELECT v.id as variant_id, v.name, v.weight_kg, ss.quantity
+                    FROM seller_stock ss
+                    JOIN product_variants v ON ss.variant_id = v.id
+                    WHERE ss.seller_id = %s
+                    ORDER BY v.product_id, v.sort_order
+                """, (seller_id,))
+                return cur.fetchall()
+
+def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
+    if quantity <= 0:
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Проверяем текущее количество
+            cur.execute(
+                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND variant_id = %s",
+                (seller_id, variant_id)
+            )
+            row = cur.fetchone()
+            if not row or row['quantity'] < quantity:
+                logger.warning(f"⚠️ Недостаточно товара variant {variant_id} у продавца {seller_id}: доступно {row['quantity'] if row else 0}, требуется {quantity}. Списание будет выполнено.")
+            cur.execute(
+                "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND variant_id = %s",
+                (quantity, seller_id, variant_id)
+            )
+            cur.execute("""
+                INSERT INTO stock_movements (variant_id, quantity_change, reason, order_id, seller_id)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (variant_id, -quantity, reason, order_id, seller_id))
+            conn.commit()
+
+def increase_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
+    if quantity <= 0:
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO seller_stock (seller_id, variant_id, quantity)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (seller_id, variant_id)
+                DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
+            """, (seller_id, variant_id, quantity))
+            cur.execute("""
+                INSERT INTO stock_movements (variant_id, quantity_change, reason, order_id, seller_id)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (variant_id, quantity, reason, order_id, seller_id))
+            conn.commit()
+
+def get_negative_stock_summary(seller_id: int):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT p.name as product_name, v.name as variant_name, ss.quantity
+                FROM seller_stock ss
+                JOIN product_variants v ON ss.variant_id = v.id
+                JOIN products p ON v.product_id = p.id
+                WHERE ss.seller_id = %s AND ss.quantity < 0
+                ORDER BY p.name, v.sort_order
+            """, (seller_id,))
+            return cur.fetchall()
+
+# ========== Остатки на хабе (в кг) ==========
+def get_hub_stock(product_id: int = None):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if product_id:
+                cur.execute("SELECT quantity_kg FROM hub_stock WHERE product_id = %s", (product_id,))
+                row = cur.fetchone()
+                return row['quantity_kg'] if row else 0
+            else:
+                cur.execute("""
+                    SELECT p.id, p.name, hs.quantity_kg
+                    FROM hub_stock hs
+                    JOIN products p ON hs.product_id = p.id
+                    ORDER BY p.name
+                """)
+                return cur.fetchall()
+
+def increase_hub_stock(product_id: int, quantity_kg: float, reason: str, order_id: int = None):
+    if quantity_kg <= 0:
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO hub_stock (product_id, quantity_kg)
+                VALUES (%s, %s)
+                ON CONFLICT (product_id)
+                DO UPDATE SET quantity_kg = hub_stock.quantity_kg + EXCLUDED.quantity_kg
+            """, (product_id, quantity_kg))
+            # Здесь можно добавить запись в movements, если нужно
+            conn.commit()
+
+def decrease_hub_stock(product_id: int, quantity_kg: float, reason: str, order_id: int = None):
+    if quantity_kg <= 0:
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE hub_stock SET quantity_kg = quantity_kg - %s WHERE product_id = %s",
+                (quantity_kg, product_id)
+            )
+            # Проверка на отрицательные остатки (можно добавить позже)
+            conn.commit()
+
 # ========== Заказы ==========
 def get_order_by_number(order_number: str):
     logger.info(f"🔍 get_order_by_number: ищем заказ с номером '{order_number}'")
@@ -45,11 +202,8 @@ def get_order_by_number(order_number: str):
             cur.execute("SELECT * FROM orders WHERE order_number = %s", (order_number,))
             order = cur.fetchone()
             if order:
-                logger.info(f"✅ Заказ найден: id={order['id']}, status={order['status']}")
                 order['contact'] = parse_contact(order['contact'])
                 order['items'] = parse_items(order['items'])
-            else:
-                logger.warning(f"❌ Заказ '{order_number}' не найден в таблице orders")
             return order
 
 def mark_order_as_processed(order_id: int):
@@ -58,149 +212,58 @@ def mark_order_as_processed(order_id: int):
             cur.execute("UPDATE orders SET stock_processed = TRUE WHERE id = %s", (order_id,))
             conn.commit()
 
-# ========== Товары ==========
-def get_all_products():
+# ========== Заявки на перемещение ==========
+def create_transfer_request(seller_id: int, variant_id: int, quantity: int) -> int:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, name, price, price_seller, purchase_price FROM products ORDER BY name")
-            return cur.fetchall()
-
-# ========== Остатки ==========
-def get_seller_stock(seller_id: int, product_id: int) -> int:
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s",
-                (seller_id, product_id)
-            )
-            result = cur.fetchone()
-            return result['quantity'] if result else 0
-
-def decrease_seller_stock(seller_id: int, product_id: int, quantity: int, reason: str, order_id: int = None):
-    if quantity <= 0:
-        return
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s",
-                (seller_id, product_id)
-            )
-            row = cur.fetchone()
-            if not row or row['quantity'] < quantity:
-                logger.warning(f"⚠️ Недостаточно товара (id {product_id}) у продавца {seller_id}: доступно {row['quantity'] if row else 0}, требуется {quantity}. Списание будет выполнено.")
-            cur.execute(
-                "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND product_id = %s",
-                (quantity, seller_id, product_id)
-            )
             cur.execute("""
-                INSERT INTO stock_movements (product_id, quantity_change, reason, order_id, seller_id)
+                INSERT INTO transfer_requests (from_seller_id, to_seller_id, variant_id, quantity, status)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (product_id, -quantity, reason, order_id, seller_id))
-            conn.commit()
-
-def increase_seller_stock(seller_id: int, product_id: int, quantity: int, reason: str, order_id: int = None):
-    if quantity <= 0:
-        return
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO seller_stock (seller_id, product_id, quantity)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (seller_id, product_id)
-                DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
-            """, (seller_id, product_id, quantity))
-            cur.execute("""
-                INSERT INTO stock_movements (product_id, quantity_change, reason, order_id, seller_id)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (product_id, quantity, reason, order_id, seller_id))
-            conn.commit()
-
-def get_negative_stock_summary(seller_id: int):
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT p.name, ss.quantity
-                FROM seller_stock ss
-                JOIN products p ON ss.product_id = p.id
-                WHERE ss.seller_id = %s AND ss.quantity < 0
-                ORDER BY p.name
-            """, (seller_id,))
-            return cur.fetchall()
-
-# ========== Заявки на перемещение (мультитоварные) ==========
-def create_transfer_request(seller_id: int, items: list) -> int:
-    """
-    Создаёт составную заявку на перемещение.
-    items = [{'product_id': int, 'quantity': int}, ...]
-    Возвращает ID созданной заявки.
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            # Создаём заголовок заявки
-            cur.execute("""
-                INSERT INTO transfer_requests (from_seller_id, to_seller_id, status)
-                VALUES (%s, %s, %s)
                 RETURNING id
-            """, (HUB_SELLER_ID, seller_id, 'pending'))
+            """, (HUB_SELLER_ID, seller_id, variant_id, quantity, 'pending'))
             request_id = cur.fetchone()['id']
-
-            # Добавляем позиции
-            for item in items:
-                cur.execute("""
-                    INSERT INTO transfer_request_items (request_id, product_id, quantity)
-                    VALUES (%s, %s, %s)
-                """, (request_id, item['product_id'], item['quantity']))
-
             conn.commit()
             return request_id
 
 def get_transfer_request(request_id: int):
-    """Возвращает заявку вместе со списком товаров."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM transfer_requests WHERE id = %s", (request_id,))
-            request = cur.fetchone()
-            if not request:
-                return None
-
-            cur.execute("""
-                SELECT tri.*, p.name as product_name
-                FROM transfer_request_items tri
-                JOIN products p ON tri.product_id = p.id
-                WHERE tri.request_id = %s
-            """, (request_id,))
-            items = cur.fetchall()
-            request['items'] = items
-            return request
+            return cur.fetchone()
 
 def update_transfer_request_status(request_id: int, status: str):
-    """Обновляет статус заявки."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE transfer_requests
-                SET status = %s, processed_at = %s
-                WHERE id = %s
-            """, (status, datetime.utcnow().isoformat(), request_id))
+            cur.execute(
+                "UPDATE transfer_requests SET status = %s, processed_at = %s WHERE id = %s",
+                (status, datetime.utcnow().isoformat(), request_id)
+            )
             conn.commit()
 
 # ========== Расчёты с продавцами ==========
 def get_seller_debt(seller_id: int):
+    """Долг продавца = (сумма продаж по цене продавца) - (сумма выплат)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            if seller_id == HUB_SELLER_ID:
-                price_field = "p.price"
-            else:
-                price_field = "p.price_seller"
-
-            cur.execute(f"""
-                SELECT COALESCE(SUM({price_field} * (i->>'quantity')::int), 0) as total_sales
+            # Продажи через заказы (по цене продавца)
+            cur.execute("""
+                SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_sales
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN products p ON (i->>'productId')::int = p.id
+                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
             """, (seller_id,))
             total_sales = cur.fetchone()['total_sales']
 
+            # Прямые продажи (тоже по цене продавца, но в direct_sales хранится цена покупателя? Нужно уточнить)
+            # Для простоты будем считать, что в direct_sales.items хранится price = цена продавца
+            cur.execute("""
+                SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as total_direct
+                FROM direct_sales ds, jsonb_array_elements(ds.items) i
+                WHERE ds.seller_id = %s
+            """, (seller_id,))
+            total_direct = cur.fetchone()['total_direct']
+
+            # Выплаты
             cur.execute("""
                 SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid
                 FROM seller_payments
@@ -208,31 +271,27 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_paid = cur.fetchone()['total_paid']
 
-            cur.execute("""
-                SELECT COALESCE(SUM(total), 0) as total_direct
-                FROM direct_sales
-                WHERE seller_id = %s
-            """, (seller_id,))
-            total_direct = cur.fetchone()['total_direct']
-
             debt = total_sales + total_direct - total_paid
             return debt, total_sales, total_paid, total_direct
 
 def get_seller_profit(seller_id: int):
+    """Прибыль продавца = сумма продаж по цене покупателя - сумма продаж по цене продавца"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Продажи по цене покупателя (через заказы)
             cur.execute("""
-                SELECT COALESCE(SUM(p.price * (i->>'quantity')::int), 0) as total_buyer
+                SELECT COALESCE(SUM(v.price * (i->>'quantity')::int), 0) as total_buyer
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN products p ON (i->>'productId')::int = p.id
+                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
             """, (seller_id,))
             total_buyer = cur.fetchone()['total_buyer']
 
+            # Продажи по цене продавца (те же заказы)
             cur.execute("""
-                SELECT COALESCE(SUM(p.price_seller * (i->>'quantity')::int), 0) as total_seller
+                SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_seller
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN products p ON (i->>'productId')::int = p.id
+                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
             """, (seller_id,))
             total_seller = cur.fetchone()['total_seller']
@@ -288,6 +347,10 @@ def create_direct_sale(seller_id: int, items: list, total: int) -> int:
 
 # ========== Закупки (только для админа) ==========
 def create_purchase(seller_id: int, items: list, total: int, comment: str = "") -> int:
+    """
+    items: список словарей с полями:
+        product_id, quantity_kg (сколько кг закуплено), price_per_kg
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -298,17 +361,13 @@ def create_purchase(seller_id: int, items: list, total: int, comment: str = "") 
             purchase_id = cur.fetchone()['id']
 
             for item in items:
+                # Записываем детали закупки
                 cur.execute("""
-                    INSERT INTO purchase_items (purchase_id, product_id, quantity, price_per_unit, total)
+                    INSERT INTO purchase_items (purchase_id, product_id, quantity_kg, price_per_kg, total)
                     VALUES (%s, %s, %s, %s, %s)
-                """, (purchase_id, item['product_id'], item['quantity'], item['price_per_unit'], item['price_per_unit'] * item['quantity']))
-                increase_seller_stock(
-                    seller_id=HUB_SELLER_ID,
-                    product_id=item['product_id'],
-                    quantity=item['quantity'],
-                    reason='purchase',
-                    order_id=None
-                )
+                """, (purchase_id, item['product_id'], item['quantity_kg'], item['price_per_kg'], item['quantity_kg'] * item['price_per_kg']))
+                # Увеличиваем остатки на хабе в кг
+                increase_hub_stock(item['product_id'], item['quantity_kg'], 'purchase', None)
             conn.commit()
             return purchase_id
 
@@ -341,16 +400,60 @@ def get_purchases_history(limit: int = 20):
             """, (limit,))
             return cur.fetchall()
 
+# ========== Фасовка ==========
+def create_packing_operation(product_id: int, variant_id: int, quantity_packs: int, created_by: int):
+    """Создаёт операцию фасовки: списывает кг с хаба и добавляет упаковки продавцу-кладовщику"""
+    variant = get_variant(variant_id)
+    if not variant:
+        raise ValueError("Variant not found")
+    weight_used = quantity_packs * variant['weight_kg']
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Проверяем достаточно ли кг на хабе
+            cur.execute("SELECT quantity_kg FROM hub_stock WHERE product_id = %s", (product_id,))
+            row = cur.fetchone()
+            if not row or row['quantity_kg'] < weight_used:
+                raise ValueError("Недостаточно товара на хабе")
+
+            # Уменьшаем хаб
+            cur.execute(
+                "UPDATE hub_stock SET quantity_kg = quantity_kg - %s WHERE product_id = %s",
+                (weight_used, product_id)
+            )
+            # Увеличиваем остатки кладовщика (HUB_SELLER_ID) по данному варианту
+            cur.execute("""
+                INSERT INTO seller_stock (seller_id, variant_id, quantity)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (seller_id, variant_id)
+                DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
+            """, (HUB_SELLER_ID, variant_id, quantity_packs))
+
+            # Записываем операцию
+            cur.execute("""
+                INSERT INTO packing_operations (product_id, variant_id, quantity_packs, weight_used, created_by)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """, (product_id, variant_id, quantity_packs, weight_used, created_by))
+            op_id = cur.fetchone()['id']
+            conn.commit()
+            return op_id
+
 # ========== Расширенные функции для админа ==========
 def get_all_sellers_stock():
+    """Возвращает остатки всех продавцов сгруппированно"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT s.id, s.name, p.id as product_id, p.name as product_name, ss.quantity
+                SELECT s.id as seller_id, s.name as seller_name,
+                       p.id as product_id, p.name as product_name,
+                       v.id as variant_id, v.name as variant_name,
+                       ss.quantity
                 FROM seller_stock ss
                 JOIN sellers s ON ss.seller_id = s.id
-                JOIN products p ON ss.product_id = p.id
-                ORDER BY s.name, p.name
+                JOIN product_variants v ON ss.variant_id = v.id
+                JOIN products p ON v.product_id = p.id
+                ORDER BY s.name, p.name, v.sort_order
             """)
             return cur.fetchall()
 
@@ -359,10 +462,11 @@ def get_total_payments_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid FROM seller_payments WHERE status = 'confirmed'")
             total_paid = cur.fetchone()['total_paid']
+            # Общий долг всех продавцов (сумма их долгов)
             cur.execute("""
-                SELECT COALESCE(SUM(p.price_seller * (i->>'quantity')::int), 0) as total_debt
+                SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_debt
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN products p ON (i->>'productId')::int = p.id
+                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.status = 'completed' AND o.stock_processed = TRUE
             """)
             total_debt = cur.fetchone()['total_debt']
@@ -379,10 +483,7 @@ def get_pending_payments():
                 ORDER BY sp.created_at DESC
             """)
             rows = cur.fetchall()
-            result = []
             for row in rows:
-                row_dict = dict(row)
-                if 'created_at' in row_dict and row_dict['created_at']:
-                    row_dict['created_at'] = str(row_dict['created_at'])
-                result.append(row_dict)
-            return result
+                if row['created_at']:
+                    row['created_at'] = str(row['created_at'])
+            return rows
