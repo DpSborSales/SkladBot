@@ -279,21 +279,32 @@ def update_transfer_request_status(request_id: int, status: str):
 
 # ========== Расчёты с продавцами ==========
 def get_seller_debt(seller_id: int):
-    """Долг продавца = (сумма продаж по цене продавца) + (прямые продажи) - (сумма выплат)"""
+    """Долг продавца перед админом.
+       Для обычных продавцов: (продажи по цене продавца) + (прямые продажи по цене продавца) - выплаты.
+       Для кладовщика (HUB_SELLER_ID): (продажи по цене покупателя) + (прямые продажи по цене покупателя) - выплаты.
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Продажи через заказы (по цене продавца) – только подтверждённые (stock_processed)
-            cur.execute("""
-                SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_sales
+            # Определяем ценовое поле в зависимости от продавца
+            if seller_id == HUB_SELLER_ID:
+                price_field_orders = "v.price"
+                price_field_direct = "(i->>'price')::int"
+            else:
+                price_field_orders = "v.price_seller"
+                price_field_direct = "(i->>'price_seller')::int"
+
+            # Продажи через заказы – только подтверждённые (stock_processed)
+            cur.execute(f"""
+                SELECT COALESCE(SUM({price_field_orders} * (i->>'quantity')::int), 0) as total_sales
                 FROM orders o, jsonb_array_elements(o.items) i
                 JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
             """, (seller_id,))
             total_sales = cur.fetchone()['total_sales']
 
-            # Прямые продажи (по цене продавца) – из поля price_seller в items
-            cur.execute("""
-                SELECT COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as total_direct
+            # Прямые продажи
+            cur.execute(f"""
+                SELECT COALESCE(SUM({price_field_direct} * (i->>'quantity')::int), 0) as total_direct
                 FROM direct_sales ds, jsonb_array_elements(ds.items) i
                 WHERE ds.seller_id = %s
             """, (seller_id,))
@@ -311,9 +322,15 @@ def get_seller_debt(seller_id: int):
             return debt, total_sales, total_paid, total_direct
 
 def get_seller_profit(seller_id: int):
-    """Прибыль продавца = сумма продаж по цене покупателя - сумма продаж по цене продавца"""
+    """Прибыль продавца = сумма продаж по цене покупателя - сумма продаж по цене продавца.
+       Для кладовщика (HUB_SELLER_ID) обе суммы равны (используется цена покупателя), поэтому прибыль = 0.
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Если это кладовщик, его прибыль всегда 0 (он не зарабатывает наценку)
+            if seller_id == HUB_SELLER_ID:
+                return 0, 0, 0
+
             # Продажи по цене покупателя (через заказы)
             cur.execute("""
                 SELECT COALESCE(SUM(v.price * (i->>'quantity')::int), 0) as total_buyer
@@ -509,7 +526,7 @@ def get_total_payments_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid FROM seller_payments WHERE status = 'confirmed'")
             total_paid = cur.fetchone()['total_paid']
-            # Общий долг всех продавцов (сумма их долгов)
+            # Общий долг всех продавцов (сумма их долгов) – для кладовщика уже учтено в get_seller_debt
             cur.execute("""
                 SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_debt
                 FROM orders o, jsonb_array_elements(o.items) i
