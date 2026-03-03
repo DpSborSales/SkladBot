@@ -98,19 +98,25 @@ def register_transfer_handlers(bot):
             call.message.chat.id,
             call.message.message_id
         )
-        bot.register_next_step_handler_by_chat_id(call.message.chat.id, process_transfer_quantity, user_id, product_id, variant_id)
+        bot.register_next_step_handler_by_chat_id(
+            call.message.chat.id,
+            process_transfer_quantity,
+            user_id, product_id, variant_id
+        )
         bot.answer_callback_query(call.id)
 
     def process_transfer_quantity(message, user_id, product_id, variant_id):
+        logger.info(f"📝 Ввод количества для товара {product_id}, вариант {variant_id}")
         session = transfer_sessions.pop(user_id, None)
         if not session:
             bot.reply_to(message, "❌ Сессия истекла. Начните заново.")
             return
+
         try:
             qty = int(message.text.strip())
             if qty <= 0:
                 raise ValueError
-        except:
+        except ValueError:
             bot.reply_to(message, "❌ Введите положительное целое число.")
             return
 
@@ -119,7 +125,14 @@ def register_transfer_handlers(bot):
             bot.reply_to(message, "❌ Ошибка доступа.")
             return
 
-        request_id = create_transfer_request(seller['id'], variant_id, qty)
+        try:
+            request_id = create_transfer_request(seller['id'], variant_id, qty)
+            logger.info(f"✅ Заявка на перемещение {request_id} создана")
+        except Exception as e:
+            logger.exception(f"Ошибка при создании заявки: {e}")
+            bot.reply_to(message, "❌ Не удалось создать заявку из-за внутренней ошибки.")
+            return
+
         hub_seller = get_seller_by_id(HUB_SELLER_ID)
         if hub_seller:
             markup = types.InlineKeyboardMarkup()
