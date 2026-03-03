@@ -24,14 +24,94 @@ def register_admin_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "⏳ Ожидают обработки" and is_admin(m.from_user.id))
     def handle_pending_payments(message):
-        # ... (без изменений, как в предыдущей версии)
-        pass
+        logger.info("Вызван handle_pending_payments")
+        try:
+            pending = get_pending_payments()
+            logger.info(f"Найдено неподтверждённых выплат: {len(pending)}")
+        except Exception as e:
+            logger.error(f"Ошибка в handle_pending_payments: {e}")
+            bot.send_message(message.chat.id, "❌ Произошла ошибка при загрузке выплат.")
+            return
+        if not pending:
+            bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат.")
+            return
+        for p in pending:
+            date_str = p['created_at'][:10] if p['created_at'] else 'неизвестно'
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_pay_confirm_{p['id']}"),
+                types.InlineKeyboardButton("✏️ Изменить", callback_data=f"admin_pay_edit_{p['id']}")
+            )
+            bot.send_message(
+                message.chat.id,
+                f"💸 *Запрос на выплату*\n\n"
+                f"Продавец: {p['seller_name']}\n"
+                f"Сумма: {p['amount']} руб.\n"
+                f"Дата: {date_str}\n\n"
+                f"Действие:",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
 
-    # ... (другие обработчики выплат остаются без изменений)
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_pay_confirm_') and is_admin(call.from_user.id))
+    def admin_pay_confirm(call):
+        payment_id = int(call.data.split('_')[3])
+        payment = get_payment_request(payment_id)
+        if not payment or payment['status'] != 'pending':
+            bot.answer_callback_query(call.id, "❌ Заявка уже обработана или не найдена")
+            return
+        update_payment_status(payment_id, 'confirmed', confirmed_amount=payment['amount'])
+        bot.edit_message_text(
+            f"✅ Выплата {payment['amount']} руб. подтверждена.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.answer_callback_query(call.id, "✅ Подтверждено")
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_pay_edit_') and is_admin(call.from_user.id))
+    def admin_pay_edit(call):
+        payment_id = int(call.data.split('_')[3])
+        payment = get_payment_request(payment_id)
+        if not payment or payment['status'] != 'pending':
+            bot.answer_callback_query(call.id, "❌ Заявка уже обработана или не найдена")
+            return
+        bot.edit_message_text(
+            f"✏️ Введите новую сумму для выплаты:",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.register_next_step_handler_by_chat_id(call.message.chat.id, process_admin_pay_edit, payment_id, call.message.chat.id)
+        bot.answer_callback_query(call.id)
+
+    def process_admin_pay_edit(message, payment_id, original_chat_id):
+        try:
+            amount = int(message.text.strip())
+            if amount <= 0:
+                raise ValueError
+        except:
+            bot.reply_to(message, "❌ Введите положительное целое число.")
+            return
+        payment = get_payment_request(payment_id)
+        if not payment or payment['status'] != 'pending':
+            bot.reply_to(message, "❌ Заявка уже обработана или не найдена")
+            return
+        update_payment_status(payment_id, 'confirmed', confirmed_amount=amount)
+        seller = get_seller_by_id(payment['seller_id'])
+        debt, _, _, _ = get_seller_debt(payment['seller_id'])
+        try:
+            bot.send_message(
+                seller['telegram_id'],
+                f"✅ Админ подтвердил получение *{amount} руб.*\n"
+                f"Ваш долг составляет *{debt} руб.*",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка уведомления продавца: {e}")
+        bot.reply_to(message, f"✅ Вы подтвердили получение {amount} руб. от продавца.")
 
     @bot.message_handler(func=lambda m: m.text == "📦 Остатки" and is_admin(m.from_user.id))
     def handle_admin_stock(message):
-        # Получаем всех продавцов, кроме администратора
+        # Получаем всех продавцов, кроме администратора (его id равен ADMIN_ID)
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -123,7 +203,7 @@ def register_admin_handlers(bot):
                 """)
                 all_variants = cur.fetchall()
 
-        # Суммарные остатки по каждому варианту от всех продавцов (включая кладовщика, но исключая администратора)
+        # Суммарные остатки по каждому варианту от всех продавцов (кроме администратора)
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -181,7 +261,28 @@ def register_admin_handlers(bot):
             markup.add(types.InlineKeyboardButton(s['name'], callback_data=f"payments_seller_{s['id']}"))
         bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=markup)
 
-    # ... (остальные обработчики выплат, включая payments_seller, без изменений)
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('payments_seller_') and is_admin(call.from_user.id))
+    def payments_seller(call):
+        seller_id = int(call.data.split('_')[2])
+        debt, total_sales, total_paid, total_direct = get_seller_debt(seller_id)
+        profit, total_buyer, total_seller = get_seller_profit(seller_id)
+        seller = get_seller_by_id(seller_id)
+        msg = (
+            f"💰 *Продавец {seller['name']}*\n\n"
+            f"Долг перед админом: *{debt} руб.*\n"
+            f"Всего продано (по цене продавца): {total_sales} руб.\n"
+            f"Всего выплачено: {total_paid} руб.\n"
+            f"Прямые продажи: {total_direct} руб.\n"
+            f"Чистая прибыль: *{profit} руб.*\n"
+            f"(продажи покупателям: {total_buyer} руб., закупочная стоимость: {total_seller} руб.)"
+        )
+        bot.edit_message_text(
+            msg,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+        bot.answer_callback_query(call.id)
 
     @bot.message_handler(func=lambda m: m.text == "📦 Закуп товаров" and is_admin(m.from_user.id))
     def handle_purchase(message):
@@ -197,7 +298,81 @@ def register_admin_handlers(bot):
             reply_markup=markup
         )
 
-    # ... (обработчики истории закупок без изменений)
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_history" and is_admin(call.from_user.id))
+    def purchase_history(call):
+        user_id = call.from_user.id
+        logger.info(f"📜 Вызвана история закупок пользователем {user_id}")
+        try:
+            history = get_purchases_history(10)
+            logger.info(f"Получено {len(history)} записей истории")
+        except Exception as e:
+            logger.error(f"Ошибка при получении истории закупок: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка базы данных")
+            return
+        if not history:
+            bot.edit_message_text(
+                "📭 История закупок пуста.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            bot.answer_callback_query(call.id)
+            return
+        markup = types.InlineKeyboardMarkup()
+        for h in history:
+            date_str = str(h['purchase_date'])[:10]
+            btn_text = f"{date_str} – {h['total']} руб."
+            markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"purchase_view_{h['id']}"))
+        try:
+            bot.edit_message_text(
+                "📜 *История закупок*\n\nВыберите запись:",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
+            bot.send_message(
+                call.message.chat.id,
+                "📜 *История закупок*\n\nВыберите запись:",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('purchase_view_') and is_admin(call.from_user.id))
+    def purchase_view(call):
+        logger.info(f"✅ Вызван purchase_view с data={call.data}")
+        try:
+            parts = call.data.split('_')
+            if len(parts) < 3:
+                logger.error(f"Неверный формат callback: {call.data}")
+                bot.answer_callback_query(call.id, "❌ Ошибка данных")
+                return
+            purchase_id = int(parts[2])
+            purchase = get_purchase(purchase_id)
+            if not purchase:
+                logger.error(f"Закупка {purchase_id} не найдена")
+                bot.answer_callback_query(call.id, "❌ Закупка не найдена")
+                return
+            date_str = str(purchase['purchase_date'])[:10] if purchase['purchase_date'] else 'неизвестно'
+            items_text = "\n".join([f"• {item['name']}: {item['quantity_kg']} кг (по {item['price_per_kg']} руб./кг)" for item in purchase['items']])
+            msg = (
+                f"📦 *Закупка от {date_str}*\n\n"
+                f"{items_text}\n\n"
+                f"Итого: *{purchase['total']} руб.*\n"
+                f"Комментарий: {purchase['comment']}"
+            )
+            bot.edit_message_text(
+                msg,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='Markdown'
+            )
+            bot.answer_callback_query(call.id)
+        except Exception as e:
+            logger.error(f"Ошибка в purchase_view: {e}")
+            bot.answer_callback_query(call.id, "❌ Внутренняя ошибка")
 
     @bot.callback_query_handler(func=lambda call: call.data == "purchase_new" and is_admin(call.from_user.id))
     def purchase_new(call):
@@ -311,7 +486,8 @@ def register_admin_handlers(bot):
             'quantity_kg': qty_kg,
             'price_per_kg': price_per_kg
         })
-        # Можно сразу показать сводку, либо продолжить добавление
+        logger.info(f"✅ Добавлен товар {product_id} в закупку: {qty_kg} кг по {price_per_kg} руб.")
+        # Сразу показываем сводку
         show_purchase_summary(user_id)
 
     def show_purchase_summary(user_id):
@@ -339,4 +515,65 @@ def register_admin_handlers(bot):
             reply_markup=markup
         )
 
-    # ... (остальные обработчики закупок без изменений)
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_add_item" and is_admin(call.from_user.id))
+    def purchase_add_item(call):
+        user_id = call.from_user.id
+        session = purchase_sessions.get(user_id)
+        if not session:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+        products = get_all_products()
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for p in products:
+            markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад к сводке", callback_data="purchase_show_summary"))
+        # Редактируем сообщение со сводкой, заменяя его на список товаров
+        bot.edit_message_text(
+            "🛒 *Добавление товара*\n\nВыберите товар:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_show_summary" and is_admin(call.from_user.id))
+    def purchase_show_summary(call):
+        user_id = call.from_user.id
+        show_purchase_summary(user_id)
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_finish" and is_admin(call.from_user.id))
+    def purchase_finish(call):
+        user_id = call.from_user.id
+        session = purchase_sessions.pop(user_id, None)
+        if not session or not session['items']:
+            bot.answer_callback_query(call.id, "❌ Нет товаров в закупке")
+            return
+        total = sum(item['quantity_kg'] * item['price_per_kg'] for item in session['items'])
+        admin_seller = get_seller_by_telegram_id(ADMIN_ID)
+        seller_id = admin_seller['id'] if admin_seller else None
+        try:
+            purchase_id = create_purchase(seller_id, session['items'], total, comment="")
+            logger.info(f"Закупка {purchase_id} успешно создана")
+        except Exception as e:
+            logger.error(f"Ошибка при создании закупки: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка базы данных", show_alert=True)
+            return
+        bot.edit_message_text(
+            f"✅ Закупка №{purchase_id} успешно проведена!\nТовары добавлены на склад хаба.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.answer_callback_query(call.id, "✅ Закупка завершена")
+
+    @bot.callback_query_handler(func=lambda call: call.data == "purchase_abort" and is_admin(call.from_user.id))
+    def purchase_abort(call):
+        user_id = call.from_user.id
+        purchase_sessions.pop(user_id, None)
+        bot.edit_message_text(
+            "❌ Закупка отменена.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.answer_callback_query(call.id)
