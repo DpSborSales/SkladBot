@@ -36,28 +36,18 @@ def register_common_handlers(bot):
         if not seller:
             bot.reply_to(message, "❌ У вас нет доступа к этому боту.")
             return
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT p.name, v.name as variant_name, ss.quantity
-                    FROM seller_stock ss
-                    JOIN product_variants v ON ss.variant_id = v.id
-                    JOIN products p ON v.product_id = p.id
-                    WHERE ss.seller_id = %s
-                    ORDER BY p.name, v.sort_order
-                """, (seller['id'],))
-                stocks = cur.fetchall()
+        stocks = get_seller_stock(seller['id'])  # теперь возвращает все варианты с количествами
         if not stocks:
             bot.reply_to(message, "📦 У вас нет товаров на складе.")
             return
         lines = []
         for row in stocks:
             if row['quantity'] > 0:
-                lines.append(f"• {row['name']} ({row['variant_name']}): {row['quantity']} шт")
+                lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт")
             elif row['quantity'] < 0:
-                lines.append(f"• {row['name']} ({row['variant_name']}): {row['quantity']} шт (❗ минус)")
+                lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт (❗ минус)")
             else:
-                lines.append(f"• {row['name']} ({row['variant_name']}): 0 шт")
+                lines.append(f"• {row['product_name']} ({row['variant_name']}): 0 шт")
         bot.reply_to(message, "📦 *Ваши остатки:*\n" + "\n".join(lines), parse_mode='Markdown')
 
     @bot.message_handler(func=lambda m: m.text == "📋 Ожидают обработки")
@@ -81,7 +71,6 @@ def register_common_handlers(bot):
         for order in pending:
             order_number = order['order_number']
             items = order['items']
-            # Формируем текст с учётом вариантов
             items_text_lines = []
             for item in items:
                 if item.get('variantName'):
