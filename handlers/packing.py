@@ -3,7 +3,7 @@ import logging
 from telebot import types
 from models import (
     get_seller_by_telegram_id, get_all_products, get_product_variants,
-    create_packing_operation, get_hub_stock
+    create_packing_operation, get_hub_stock, get_variant
 )
 from config import HUB_SELLER_ID
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 packing_sessions = {}
 
 def register_packing_handlers(bot):
-    @bot.message_handler(func=lambda m: m.text == "📦 Фасовка" and m.from_user.id)
+    @bot.message_handler(func=lambda m: m.text == "📦 Фасовка")
     def handle_packing(message):
         user_id = message.from_user.id
         seller = get_seller_by_telegram_id(user_id)
@@ -45,24 +45,21 @@ def register_packing_handlers(bot):
             return
 
         variants = get_product_variants(product_id)
-        if not variants:
-            bot.answer_callback_query(call.id, "❌ У товара нет вариантов фасовки")
-            return
-
-        # Отфильтровываем вариант "Россыпь" (если есть) — его нельзя фасовать
         pack_variants = [v for v in variants if v['name'] != 'Россыпь']
         if not pack_variants:
             bot.answer_callback_query(call.id, "❌ Нет вариантов для фасовки")
             return
 
         markup = types.InlineKeyboardMarkup(row_width=2)
+        products = get_all_products()
+        product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
         for v in pack_variants:
+            btn_text = f"{product_name} {v['name']} ({v['weight_kg']} кг)"
             markup.add(types.InlineKeyboardButton(
-                f"{v['name']} ({v['weight_kg']} кг)",
-                callback_data=f"pack_var_{v['id']}"
+                btn_text,
+                callback_data=f"pack_var_{product_id}_{v['id']}"
             ))
         markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="pack_back_to_products"))
-
         bot.edit_message_text(
             f"Выберите фасовку:",
             call.message.chat.id,
@@ -74,13 +71,20 @@ def register_packing_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('pack_var_'))
     def select_variant(call):
         user_id = call.from_user.id
-        variant_id = int(call.data.split('_')[2])
+        parts = call.data.split('_')
+        product_id = int(parts[2])
+        variant_id = int(parts[3])
         seller = get_seller_by_telegram_id(user_id)
         if not seller or seller['id'] != HUB_SELLER_ID:
             bot.answer_callback_query(call.id, "❌ Ошибка доступа")
             return
 
-        packing_sessions[user_id] = {'variant_id': variant_id}
+        packing_sessions[user_id] = {
+            'product_id': product_id,
+            'variant_id': variant_id,
+            'chat_id': call.message.chat.id,
+            'message_id': call.message.message_id
+        }
         bot.edit_message_text(
             f"Введите количество упаковок:",
             call.message.chat.id,
@@ -94,7 +98,6 @@ def register_packing_handlers(bot):
         if not session:
             bot.reply_to(message, "❌ Сессия истекла. Начните заново.")
             return
-
         try:
             qty = int(message.text.strip())
             if qty <= 0:
@@ -103,6 +106,7 @@ def register_packing_handlers(bot):
             bot.reply_to(message, "❌ Введите положительное целое число.")
             return
 
+        product_id = session['product_id']
         variant_id = session['variant_id']
         seller = get_seller_by_telegram_id(user_id)
         if not seller or seller['id'] != HUB_SELLER_ID:
@@ -111,15 +115,14 @@ def register_packing_handlers(bot):
 
         try:
             op_id = create_packing_operation(
-                product_id=None,  # можно не передавать, определим по variant
+                product_id=product_id,
                 variant_id=variant_id,
                 quantity_packs=qty,
                 created_by=seller['id']
             )
             bot.reply_to(
                 message,
-                f"✅ Операция фасовки №{op_id} выполнена!\n"
-                f"Создано {qty} упаковок."
+                f"✅ Операция фасовки №{op_id} выполнена!\nСоздано {qty} упаковок."
             )
         except ValueError as e:
             bot.reply_to(message, f"❌ {e}")
