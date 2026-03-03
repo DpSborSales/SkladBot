@@ -112,12 +112,10 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Обновляем существующую запись
             cur.execute(
                 "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
                 (quantity, seller_id, product_id, variant_id)
             )
-            # Если обновление не затронуло строки, значит записи не было – создаём с отрицательным значением
             if cur.rowcount == 0:
                 cur.execute("""
                     INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
@@ -277,6 +275,41 @@ def update_transfer_request_status(request_id: int, status: str):
             )
             conn.commit()
 
+def get_pending_transfer_requests_for_hub():
+    """Возвращает все заявки на перемещение, где кладовщик является отправителем и статус 'pending'"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT tr.id, tr.from_seller_id, tr.to_seller_id, tr.status,
+                       tri.variant_id, tri.quantity,
+                       v.name as variant_name, p.name as product_name
+                FROM transfer_requests tr
+                JOIN transfer_request_items tri ON tr.id = tri.request_id
+                JOIN product_variants v ON tri.variant_id = v.id
+                JOIN products p ON v.product_id = p.id
+                WHERE tr.from_seller_id = %s AND tr.status = 'pending'
+                ORDER BY tr.created_at DESC
+            """, (HUB_SELLER_ID,))
+            rows = cur.fetchall()
+            requests = {}
+            for row in rows:
+                req_id = row['id']
+                if req_id not in requests:
+                    requests[req_id] = {
+                        'id': req_id,
+                        'from_seller_id': row['from_seller_id'],
+                        'to_seller_id': row['to_seller_id'],
+                        'status': row['status'],
+                        'items': []
+                    }
+                requests[req_id]['items'].append({
+                    'variant_id': row['variant_id'],
+                    'quantity': row['quantity'],
+                    'variant_name': row['variant_name'],
+                    'product_name': row['product_name']
+                })
+            return list(requests.values())
+
 # ========== Расчёты с продавцами ==========
 def get_seller_debt(seller_id: int):
     """Долг продавца перед админом.
@@ -285,7 +318,6 @@ def get_seller_debt(seller_id: int):
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Определяем ценовое поле в зависимости от продавца
             if seller_id == HUB_SELLER_ID:
                 price_field_orders = "v.price"
                 price_field_direct = "(i->>'price')::int"
@@ -293,7 +325,6 @@ def get_seller_debt(seller_id: int):
                 price_field_orders = "v.price_seller"
                 price_field_direct = "(i->>'price_seller')::int"
 
-            # Продажи через заказы – только подтверждённые (stock_processed)
             cur.execute(f"""
                 SELECT COALESCE(SUM({price_field_orders} * (i->>'quantity')::int), 0) as total_sales
                 FROM orders o, jsonb_array_elements(o.items) i
@@ -302,7 +333,6 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_sales = cur.fetchone()['total_sales']
 
-            # Прямые продажи
             cur.execute(f"""
                 SELECT COALESCE(SUM({price_field_direct} * (i->>'quantity')::int), 0) as total_direct
                 FROM direct_sales ds, jsonb_array_elements(ds.items) i
@@ -310,7 +340,6 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_direct = cur.fetchone()['total_direct']
 
-            # Выплаты (только подтверждённые)
             cur.execute("""
                 SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid
                 FROM seller_payments
@@ -327,11 +356,9 @@ def get_seller_profit(seller_id: int):
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Если это кладовщик, его прибыль всегда 0 (он не зарабатывает наценку)
             if seller_id == HUB_SELLER_ID:
                 return 0, 0, 0
 
-            # Продажи по цене покупателя (через заказы)
             cur.execute("""
                 SELECT COALESCE(SUM(v.price * (i->>'quantity')::int), 0) as total_buyer
                 FROM orders o, jsonb_array_elements(o.items) i
@@ -340,7 +367,6 @@ def get_seller_profit(seller_id: int):
             """, (seller_id,))
             total_buyer = cur.fetchone()['total_buyer']
 
-            # Продажи по цене продавца (те же заказы)
             cur.execute("""
                 SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_seller
                 FROM orders o, jsonb_array_elements(o.items) i
@@ -349,7 +375,6 @@ def get_seller_profit(seller_id: int):
             """, (seller_id,))
             total_seller = cur.fetchone()['total_seller']
 
-            # Добавляем прямые продажи (для прибыли – тоже разница между ценой покупателя и продавца)
             cur.execute("""
                 SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as direct_buyer,
                        COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as direct_seller
@@ -400,7 +425,6 @@ def update_payment_status(payment_id: int, status: str, confirmed_amount: int = 
 def create_direct_sale(seller_id: int, items: list, total: int) -> int:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Преобразуем items в JSON с нужными полями
             items_json = json.dumps(items)
             cur.execute("""
                 INSERT INTO direct_sales (seller_id, items, total)
@@ -474,18 +498,15 @@ def create_packing_operation(product_id: int, variant_id: int, quantity_packs: i
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Проверяем достаточно ли кг на хабе
             cur.execute("SELECT quantity_kg FROM hub_stock WHERE product_id = %s", (product_id,))
             row = cur.fetchone()
             if not row or row['quantity_kg'] < weight_used:
                 raise ValueError("Недостаточно товара на хабе")
 
-            # Уменьшаем хаб
             cur.execute(
                 "UPDATE hub_stock SET quantity_kg = quantity_kg - %s WHERE product_id = %s",
                 (weight_used, product_id)
             )
-            # Увеличиваем остатки кладовщика (HUB_SELLER_ID) по данному варианту
             cur.execute("""
                 INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
                 VALUES (%s, %s, %s, %s)
@@ -493,7 +514,6 @@ def create_packing_operation(product_id: int, variant_id: int, quantity_packs: i
                 DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
             """, (HUB_SELLER_ID, product_id, variant_id, quantity_packs))
 
-            # Записываем операцию
             cur.execute("""
                 INSERT INTO packing_operations (product_id, variant_id, quantity_packs, weight_used, created_by)
                 VALUES (%s, %s, %s, %s, %s)
@@ -526,7 +546,6 @@ def get_total_payments_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid FROM seller_payments WHERE status = 'confirmed'")
             total_paid = cur.fetchone()['total_paid']
-            # Общий долг всех продавцов (сумма их долгов) – для кладовщика уже учтено в get_seller_debt
             cur.execute("""
                 SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_debt
                 FROM orders o, jsonb_array_elements(o.items) i
