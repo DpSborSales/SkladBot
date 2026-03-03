@@ -1,4 +1,4 @@
-# models.py (полностью переработанный)
+# models.py
 import json
 import logging
 from datetime import datetime
@@ -103,14 +103,6 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
         return
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Проверяем текущее количество
-            cur.execute(
-                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND variant_id = %s",
-                (seller_id, variant_id)
-            )
-            row = cur.fetchone()
-            if not row or row['quantity'] < quantity:
-                logger.warning(f"⚠️ Недостаточно товара variant {variant_id} у продавца {seller_id}: доступно {row['quantity'] if row else 0}, требуется {quantity}. Списание будет выполнено.")
             cur.execute(
                 "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND variant_id = %s",
                 (quantity, seller_id, variant_id)
@@ -254,10 +246,9 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_sales = cur.fetchone()['total_sales']
 
-            # Прямые продажи (тоже по цене продавца, но в direct_sales хранится цена покупателя? Нужно уточнить)
-            # Для простоты будем считать, что в direct_sales.items хранится price = цена продавца
+            # Прямые продажи (по цене продавца)
             cur.execute("""
-                SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as total_direct
+                SELECT COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as total_direct
                 FROM direct_sales ds, jsonb_array_elements(ds.items) i
                 WHERE ds.seller_id = %s
             """, (seller_id,))
@@ -361,12 +352,10 @@ def create_purchase(seller_id: int, items: list, total: int, comment: str = "") 
             purchase_id = cur.fetchone()['id']
 
             for item in items:
-                # Записываем детали закупки
                 cur.execute("""
                     INSERT INTO purchase_items (purchase_id, product_id, quantity_kg, price_per_kg, total)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (purchase_id, item['product_id'], item['quantity_kg'], item['price_per_kg'], item['quantity_kg'] * item['price_per_kg']))
-                # Увеличиваем остатки на хабе в кг
                 increase_hub_stock(item['product_id'], item['quantity_kg'], 'purchase', None)
             conn.commit()
             return purchase_id
@@ -462,7 +451,6 @@ def get_total_payments_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid FROM seller_payments WHERE status = 'confirmed'")
             total_paid = cur.fetchone()['total_paid']
-            # Общий долг всех продавцов (сумма их долгов)
             cur.execute("""
                 SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_debt
                 FROM orders o, jsonb_array_elements(o.items) i
