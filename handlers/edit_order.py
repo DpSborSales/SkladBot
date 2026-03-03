@@ -126,7 +126,18 @@ def register_edit_handlers(bot):
         markup = types.InlineKeyboardMarkup(row_width=2)
         buttons = []
         for p in products:
-            buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"selprod_{session['order_number']}_{p['id']}"))
+            # Проверим, есть ли этот товар в оригинальном заказе (хотя бы один вариант)
+            # Можно показывать все товары из каталога, но логичнее только те, что есть в заказе.
+            # Но в текущей реализации показываем все товары из каталога, что может быть не совсем правильно.
+            # Лучше показывать только те товары, которые есть в оригинальном заказе.
+            pass
+
+        # Собираем уникальные product_id из original_items
+        product_ids_in_order = set(pid for (pid, vid) in session['original_items'].keys())
+        for pid in sorted(product_ids_in_order):
+            p = next((p for p in products if p['id'] == pid), None)
+            if p:
+                buttons.append(types.InlineKeyboardButton(p['name'], callback_data=f"selprod_{session['order_number']}_{pid}"))
         markup.add(*buttons)
         markup.row(types.InlineKeyboardButton("✅ Завершить", callback_data=f"finish_{session['order_number']}"))
 
@@ -167,35 +178,20 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ В заказе нет этого товара")
             return
 
-        if len(variants) == 1:
-            # Если вариант один, сразу переходим к вводу количества
-            variant_id, variant_name = variants[0]
-            session['current_product'] = product_id
-            session['current_variant'] = variant_id
-            products = get_all_products()
-            product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
-            bot.edit_message_text(
-                f"Введите количество для *{product_name} ({variant_name})*:",
-                session['chat_id'],
-                session['message_id'],
-                parse_mode='Markdown'
-            )
-            bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id, variant_id)
-        else:
-            # Показываем кнопки выбора варианта
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            for vid, vname in variants:
-                markup.add(types.InlineKeyboardButton(
-                    vname,
-                    callback_data=f"selvar_{order_num}_{product_id}_{vid}"
-                ))
-            markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data=f"backtoproducts_{order_num}"))
-            bot.edit_message_text(
-                f"Выберите фасовку:",
-                session['chat_id'],
-                session['message_id'],
-                reply_markup=markup
-            )
+        # Показываем кнопки выбора варианта (даже если один вариант)
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        products = get_all_products()
+        product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+        for vid, vname in variants:
+            btn_text = f"{product_name} {vname}"
+            markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"selvar_{order_num}_{product_id}_{vid}"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data=f"backtoproducts_{order_num}"))
+        bot.edit_message_text(
+            f"Выберите фасовку:",
+            session['chat_id'],
+            session['message_id'],
+            reply_markup=markup
+        )
         bot.answer_callback_query(call.id)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('selvar_'))
