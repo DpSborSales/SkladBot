@@ -113,7 +113,6 @@ def register_edit_handlers(bot):
         # Формируем сводку уже выбранных товаров
         selected_lines = []
         for (pid, vid), qty in session['selected_items'].items():
-            # Ищем оригинальный товар, чтобы получить variantName
             orig_key = (pid, vid)
             original_item = session['original_items'].get(orig_key)
             if original_item and original_item.get('variantName'):
@@ -123,17 +122,10 @@ def register_edit_handlers(bot):
             selected_lines.append(f"{name} – {qty} упаковок")
         summary = "\n".join(selected_lines)
 
+        # Собираем уникальные product_id из original_items (только те, что есть в заказе)
+        product_ids_in_order = set(pid for (pid, vid) in session['original_items'].keys())
         markup = types.InlineKeyboardMarkup(row_width=2)
         buttons = []
-        for p in products:
-            # Проверим, есть ли этот товар в оригинальном заказе (хотя бы один вариант)
-            # Можно показывать все товары из каталога, но логичнее только те, что есть в заказе.
-            # Но в текущей реализации показываем все товары из каталога, что может быть не совсем правильно.
-            # Лучше показывать только те товары, которые есть в оригинальном заказе.
-            pass
-
-        # Собираем уникальные product_id из original_items
-        product_ids_in_order = set(pid for (pid, vid) in session['original_items'].keys())
         for pid in sorted(product_ids_in_order):
             p = next((p for p in products if p['id'] == pid), None)
             if p:
@@ -385,7 +377,6 @@ def register_edit_handlers(bot):
         product_names = {p['id']: p['name'] for p in products}
         lines = []
         for (pid, vid), qty in session['selected_items'].items():
-            # Находим оригинальный товар для этого варианта
             orig_key = (pid, vid)
             original_item = session['original_items'].get(orig_key)
             if original_item and original_item.get('variantName'):
@@ -446,7 +437,6 @@ def register_edit_handlers(bot):
         # Списание по каждому выбранному варианту
         for (pid, vid), qty in selected.items():
             if qty > 0:
-                # Проверяем, что такой вариант есть в оригинальном заказе (по идее должен быть)
                 if (pid, vid) not in session['original_items']:
                     logger.error(f"Вариант {vid} товара {pid} не найден в оригинальном заказе")
                     bot.answer_callback_query(call.id, f"❌ Ошибка: вариант не найден")
