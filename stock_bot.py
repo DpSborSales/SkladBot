@@ -38,7 +38,15 @@ def order_completed():
                 if not seller:
                     return jsonify({'error': 'Seller not found'}), 404
                 seller_tg = seller['telegram_id']
-        items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in order['items']])
+        # Формируем текст с учётом вариантов
+        items_text_lines = []
+        for item in order['items']:
+            if item.get('variantName'):
+                items_text_lines.append(f"• {item['name']} ({item['variantName']}): {item['quantity']} шт")
+            else:
+                items_text_lines.append(f"• {item['name']}: {item['quantity']} шт")
+        items_text = "\n".join(items_text_lines)
+
         markup = types.InlineKeyboardMarkup()
         markup.row(
             types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{order_number}"),
