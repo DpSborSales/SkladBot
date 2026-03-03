@@ -4,9 +4,10 @@ from telebot import types
 from models import (
     get_seller_by_telegram_id, get_seller_by_id, get_all_products,
     create_transfer_request, get_transfer_request, update_transfer_request_status,
-    decrease_seller_stock, increase_seller_stock
+    decrease_seller_stock, increase_seller_stock, get_seller_stock
 )
 from config import HUB_SELLER_ID
+from database import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -330,44 +331,43 @@ def register_transfer_handlers(bot):
         )
         bot.answer_callback_query(call.id)
 
-    # Обработчики для кладовщика (подтверждение/отклонение)
+    # ---------- Обработчики для кладовщика (подтверждение/отклонение) ----------
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
     def approve_transfer(call):
         user_id = call.from_user.id
+        logger.info(f"✅ Нажата кнопка подтверждения заявки пользователем {user_id}")
+
         seller = get_seller_by_telegram_id(user_id)
         if not seller or seller['id'] != HUB_SELLER_ID:
+            logger.warning(f"Пользователь {user_id} не является кладовщиком")
             bot.answer_callback_query(call.id, "❌ У вас нет прав для подтверждения.")
             return
 
         request_id = int(call.data.split('_')[2])
+        logger.info(f"Подтверждение заявки {request_id}")
+
         req = get_transfer_request(request_id)
         if not req:
+            logger.error(f"Заявка {request_id} не найдена")
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
+
         if req['status'] != 'pending':
+            logger.info(f"Заявка {request_id} уже имеет статус {req['status']}")
             bot.answer_callback_query(call.id, f"✅ Заявка уже {req['status']}")
             return
 
         # Проверяем наличие всех товаров на складе хаба
         insufficient = []
         for item in req['items']:
-            # Получаем текущий остаток хаба
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s",
-                        (HUB_SELLER_ID, item['product_id'])
-                    )
-                    stock = cur.fetchone()
-                    if not stock or stock['quantity'] < item['quantity']:
-                        insufficient.append(f"{item['product_name']} (доступно {stock['quantity'] if stock else 0}, требуется {item['quantity']})")
+            stock = get_seller_stock(HUB_SELLER_ID, item['product_id'])
+            if stock < item['quantity']:
+                insufficient.append(f"{item['product_name']} (доступно {stock}, требуется {item['quantity']})")
 
         if insufficient:
-            bot.answer_callback_query(
-                call.id,
-                "❌ Недостаточно товара на хабе:\n" + "\n".join(insufficient),
-                show_alert=True
-            )
+            msg = "❌ Недостаточно товара на хабе:\n" + "\n".join(insufficient)
+            logger.warning(f"Заявка {request_id} отклонена из-за недостатка: {msg}")
+            bot.answer_callback_query(call.id, msg, show_alert=True)
             return
 
         # Выполняем перемещение
@@ -387,8 +387,9 @@ def register_transfer_handlers(bot):
                     reason='transfer_in',
                     order_id=None
                 )
+            logger.info(f"Перемещение по заявке {request_id} выполнено успешно")
         except Exception as e:
-            logger.error(f"Ошибка при перемещении: {e}")
+            logger.error(f"Ошибка при перемещении товаров: {e}", exc_info=True)
             bot.answer_callback_query(call.id, "❌ Ошибка при перемещении", show_alert=True)
             return
 
@@ -416,17 +417,25 @@ def register_transfer_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_reject_'))
     def reject_transfer(call):
         user_id = call.from_user.id
+        logger.info(f"❌ Нажата кнопка отклонения заявки пользователем {user_id}")
+
         seller = get_seller_by_telegram_id(user_id)
         if not seller or seller['id'] != HUB_SELLER_ID:
+            logger.warning(f"Пользователь {user_id} не является кладовщиком")
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
 
         request_id = int(call.data.split('_')[2])
+        logger.info(f"Отклонение заявки {request_id}")
+
         req = get_transfer_request(request_id)
         if not req:
+            logger.error(f"Заявка {request_id} не найдена")
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
+
         if req['status'] != 'pending':
+            logger.info(f"Заявка {request_id} уже имеет статус {req['status']}")
             bot.answer_callback_query(call.id, f"✅ Заявка уже {req['status']}")
             return
 
