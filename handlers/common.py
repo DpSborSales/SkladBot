@@ -80,7 +80,14 @@ def register_common_handlers(bot):
         for order in pending:
             order_number = order['order_number']
             items = order['items']
-            items_text = "\n".join([f"• {item['name']}: {item['quantity']} шт" for item in items])
+            # Формируем текст с учётом вариантов
+            items_text_lines = []
+            for item in items:
+                if item.get('variantName'):
+                    items_text_lines.append(f"• {item['name']} ({item['variantName']}): {item['quantity']} шт")
+                else:
+                    items_text_lines.append(f"• {item['name']}: {item['quantity']} шт")
+            items_text = "\n".join(items_text_lines)
             markup = types.InlineKeyboardMarkup()
             markup.row(
                 types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{order_number}"),
