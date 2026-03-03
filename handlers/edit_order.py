@@ -35,9 +35,15 @@ def register_edit_handlers(bot):
             return
 
         for item in order['items']:
+            # Используем variantId вместо productId
+            variant_id = item.get('variantId')
+            if not variant_id:
+                logger.error(f"В заказе {order_num} отсутствует variantId для товара {item.get('name')}")
+                bot.answer_callback_query(call.id, "❌ Ошибка данных заказа (нет variantId)")
+                return
             decrease_seller_stock(
                 seller_id=seller['id'],
-                product_id=item['productId'],
+                variant_id=variant_id,
                 quantity=item['quantity'],
                 reason='sale',
                 order_id=order['id']
@@ -83,7 +89,7 @@ def register_edit_handlers(bot):
 
         edit_sessions[user_id] = {
             'order_number': order_num,
-            'original_items': {item['productId']: item for item in order['items']},  # сохраняем полную информацию
+            'original_items': {item['productId']: item for item in order['items']},
             'selected_items': {},
             'message_id': call.message.message_id,
             'chat_id': call.message.chat.id
@@ -99,10 +105,8 @@ def register_edit_handlers(bot):
 
         products = get_all_products()
         product_names = {p['id']: p['name'] for p in products}
-        # Строим сводку с вариантами
         selected_lines = []
         for pid, qty in session['selected_items'].items():
-            # ищем оригинальный товар, чтобы получить variantName
             original_item = session['original_items'].get(pid)
             if original_item and original_item.get('variantName'):
                 name = f"{product_names.get(pid, 'Товар')} ({original_item['variantName']})"
@@ -178,7 +182,6 @@ def register_edit_handlers(bot):
 
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
-        # Получаем вариант из оригинального заказа
         original_item = session['original_items'].get(product_id)
         variant_display = f" ({original_item['variantName']})" if original_item and original_item.get('variantName') else ""
 
@@ -336,16 +339,23 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
             return
 
+        # Для каждого выбранного товара списываем по variantId
         for product_id, qty in selected.items():
             if qty > 0:
+                # Находим оригинальный элемент заказа, чтобы получить variantId
+                original_item = session['original_items'].get(product_id)
+                if not original_item or not original_item.get('variantId'):
+                    logger.error(f"Для товара {product_id} не найден variantId в оригинальном заказе")
+                    bot.answer_callback_query(call.id, f"❌ Ошибка: нет variantId для товара")
+                    return
                 decrease_seller_stock(
                     seller_id=seller['id'],
-                    product_id=product_id,
+                    variant_id=original_item['variantId'],
                     quantity=qty,
                     reason='sale',
                     order_id=order['id']
                 )
-                logger.info(f"✅ Списано {qty} ед. товара {product_id}")
+                logger.info(f"✅ Списано {qty} ед. товара variant {original_item['variantId']}")
 
         mark_order_as_processed(order['id'])
         logger.info(f"✅ Заказ {order_num} обработан, списано товаров: {len(selected)}")
@@ -386,9 +396,14 @@ def register_edit_handlers(bot):
             return
 
         for item in order['items']:
+            variant_id = item.get('variantId')
+            if not variant_id:
+                logger.error(f"В заказе {order_num} отсутствует variantId для товара {item.get('name')}")
+                bot.answer_callback_query(call.id, "❌ Ошибка данных заказа (нет variantId)")
+                return
             decrease_seller_stock(
                 seller_id=seller['id'],
-                product_id=item['productId'],
+                variant_id=variant_id,
                 quantity=item['quantity'],
                 reason='sale',
                 order_id=order['id']
@@ -434,4 +449,4 @@ def register_edit_handlers(bot):
                 session['chat_id'],
                 session['message_id']
             )
-        bot.answer_callback_query(call.id)
+        bot.answer_callback_query(call.id)   
