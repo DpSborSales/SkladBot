@@ -69,7 +69,7 @@ def get_variant(variant_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT v.*, p.name as product_name
+                SELECT v.*, p.name as product_name, p.id as product_id
                 FROM product_variants v
                 JOIN products p ON v.product_id = p.id
                 WHERE v.id = %s
@@ -105,39 +105,51 @@ def get_seller_stock(seller_id: int, variant_id: int = None):
 def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
     if quantity <= 0:
         return
+    variant = get_variant(variant_id)
+    if not variant:
+        raise ValueError(f"Variant {variant_id} not found")
+    product_id = variant['product_id']
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Обновляем существующую запись
             cur.execute(
-                "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND variant_id = %s",
-                (quantity, seller_id, variant_id)
+                "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
+                (quantity, seller_id, product_id, variant_id)
             )
             # Если обновление не затронуло строки, значит записи не было – создаём с отрицательным значением
             if cur.rowcount == 0:
                 cur.execute("""
-                    INSERT INTO seller_stock (seller_id, variant_id, quantity)
-                    VALUES (%s, %s, %s)
-                """, (seller_id, variant_id, -quantity))
+                    INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
+                    VALUES (%s, %s, %s, %s)
+                """, (seller_id, product_id, variant_id, -quantity))
+
             cur.execute("""
-                INSERT INTO stock_movements (variant_id, quantity_change, reason, order_id, seller_id)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (variant_id, -quantity, reason, order_id, seller_id))
+                INSERT INTO stock_movements (product_id, variant_id, quantity_change, reason, order_id, seller_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (product_id, variant_id, -quantity, reason, order_id, seller_id))
             conn.commit()
 
 def increase_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
     if quantity <= 0:
         return
+    variant = get_variant(variant_id)
+    if not variant:
+        raise ValueError(f"Variant {variant_id} not found")
+    product_id = variant['product_id']
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO seller_stock (seller_id, variant_id, quantity)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (seller_id, variant_id)
+                INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (seller_id, product_id, variant_id)
                 DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
-            """, (seller_id, variant_id, quantity))
+            """, (seller_id, product_id, variant_id, quantity))
             cur.execute("""
-                INSERT INTO stock_movements (variant_id, quantity_change, reason, order_id, seller_id)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (variant_id, quantity, reason, order_id, seller_id))
+                INSERT INTO stock_movements (product_id, variant_id, quantity_change, reason, order_id, seller_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (product_id, variant_id, quantity, reason, order_id, seller_id))
             conn.commit()
 
 def get_negative_stock_summary(seller_id: int):
@@ -458,11 +470,11 @@ def create_packing_operation(product_id: int, variant_id: int, quantity_packs: i
             )
             # Увеличиваем остатки кладовщика (HUB_SELLER_ID) по данному варианту
             cur.execute("""
-                INSERT INTO seller_stock (seller_id, variant_id, quantity)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (seller_id, variant_id)
+                INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (seller_id, product_id, variant_id)
                 DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
-            """, (HUB_SELLER_ID, variant_id, quantity_packs))
+            """, (HUB_SELLER_ID, product_id, variant_id, quantity_packs))
 
             # Записываем операцию
             cur.execute("""
