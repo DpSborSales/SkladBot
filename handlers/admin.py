@@ -111,14 +111,13 @@ def register_admin_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "📦 Остатки" and is_admin(m.from_user.id))
     def handle_admin_stock(message):
-        # Получаем всех продавцов, кроме администратора (его id равен ADMIN_ID)
+        # Получаем всех продавцов, кроме администратора (если нужно исключить)
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, name FROM sellers 
-                    WHERE id != %s 
                     ORDER BY name
-                """, (ADMIN_ID,))
+                """)
                 sellers = cur.fetchall()
         if not sellers:
             bot.send_message(message.chat.id, "❌ Нет продавцов.")
@@ -203,15 +202,14 @@ def register_admin_handlers(bot):
                 """)
                 all_variants = cur.fetchall()
 
-        # Суммарные остатки по каждому варианту от всех продавцов (кроме администратора)
+        # Суммарные остатки по каждому варианту от всех продавцов
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT variant_id, SUM(quantity) as total
                     FROM seller_stock
-                    WHERE seller_id != %s
                     GROUP BY variant_id
-                """, (ADMIN_ID,))
+                """)
                 totals = {row['variant_id']: row['total'] for row in cur.fetchall()}
 
         lines = []
@@ -241,14 +239,13 @@ def register_admin_handlers(bot):
             logger.error(f"Ошибка в handle_payments_stats: {e}")
             bot.send_message(message.chat.id, "❌ Ошибка при загрузке статистики.")
             return
-        # Получаем всех продавцов, кроме администратора
+        # Получаем всех продавцов
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, name FROM sellers 
-                    WHERE id != %s 
                     ORDER BY name
-                """, (ADMIN_ID,))
+                """)
                 sellers = cur.fetchall()
         msg = (
             f"💰 *Финансовая сводка*\n\n"
@@ -270,11 +267,10 @@ def register_admin_handlers(bot):
         msg = (
             f"💰 *Продавец {seller['name']}*\n\n"
             f"Долг перед админом: *{debt} руб.*\n"
-            f"Всего продано (по цене продавца): {total_sales} руб.\n"
-            f"Всего выплачено: {total_paid} руб.\n"
-            f"Прямые продажи: {total_direct} руб.\n"
-            f"Чистая прибыль: *{profit} руб.*\n"
-            f"(продажи покупателям: {total_buyer} руб., закупочная стоимость: {total_seller} руб.)"
+            f"Выплачено админу: *{total_paid} руб.*\n"
+            f"________________________________\n"
+            f"Общая сумма продаж: *{total_buyer} руб.*\n"
+            f"Чистая прибыль продавца: *{profit} руб.*"
         )
         bot.edit_message_text(
             msg,
@@ -527,7 +523,6 @@ def register_admin_handlers(bot):
         for p in products:
             markup.add(types.InlineKeyboardButton(p['name'], callback_data=f"purchase_prod_{p['id']}"))
         markup.add(types.InlineKeyboardButton("🔙 Назад к сводке", callback_data="purchase_show_summary"))
-        # Редактируем сообщение со сводкой, заменяя его на список товаров
         bot.edit_message_text(
             "🛒 *Добавление товара*\n\nВыберите товар:",
             call.message.chat.id,
