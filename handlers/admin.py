@@ -11,7 +11,6 @@ from models import (
 )
 from config import ADMIN_ID
 from keyboards import admin_keyboard
-from notifications import send_negative_stock_warning
 from database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -111,13 +110,9 @@ def register_admin_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "📦 Остатки" and is_admin(m.from_user.id))
     def handle_admin_stock(message):
-        # Получаем остатки всех продавцов
         all_stocks = get_all_sellers_stock()
-        # Получаем остатки хаба
         hub_stocks = get_hub_stock()
-        # Формируем сообщение
         text = "📊 *Общие остатки*\n\n"
-        # Сначала хаб
         text += "*Хаб (нерасфасовано):*\n"
         if hub_stocks:
             for item in hub_stocks:
@@ -125,7 +120,6 @@ def register_admin_handlers(bot):
         else:
             text += "• нет\n"
         text += "\n*Продавцы:*\n"
-        # Группируем по продавцам
         sellers_dict = {}
         for row in all_stocks:
             if row['seller_name'] not in sellers_dict:
