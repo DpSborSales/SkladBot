@@ -11,6 +11,7 @@ from models import (
 )
 from config import ADMIN_ID
 from keyboards import admin_keyboard
+from notifications import send_negative_stock_warning
 from database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -110,24 +111,101 @@ def register_admin_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "📦 Остатки" and is_admin(m.from_user.id))
     def handle_admin_stock(message):
-        all_stocks = get_all_sellers_stock()
-        hub_stocks = get_hub_stock()
-        text = "📊 *Общие остатки*\n\n"
-        text += "*Хаб (нерасфасовано):*\n"
-        if hub_stocks:
-            for item in hub_stocks:
-                text += f"• {item['name']}: {item['quantity_kg']} кг\n"
-        else:
-            text += "• нет\n"
-        text += "\n*Продавцы:*\n"
-        sellers_dict = {}
-        for row in all_stocks:
-            if row['seller_name'] not in sellers_dict:
-                sellers_dict[row['seller_name']] = []
-            sellers_dict[row['seller_name']].append(f"  {row['product_name']} ({row['variant_name']}): {row['quantity']} шт")
-        for seller, items in sellers_dict.items():
-            text += f"*{seller}*\n" + "\n".join(items) + "\n\n"
-        bot.send_message(message.chat.id, text, parse_mode='Markdown')
+        # Получаем список всех продавцов (кроме хаба? можно включить, но обычно хаб отдельно)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, name FROM sellers ORDER BY name")
+                sellers = cur.fetchall()
+        if not sellers:
+            bot.send_message(message.chat.id, "❌ Нет продавцов.")
+            return
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for s in sellers:
+            markup.add(types.InlineKeyboardButton(s['name'], callback_data=f"stock_seller_{s['id']}"))
+        markup.add(types.InlineKeyboardButton("📊 Все остатки", callback_data="stock_all"))
+        bot.send_message(
+            message.chat.id,
+            "📦 Выберите продавца или посмотрите общие остатки:",
+            reply_markup=markup
+        )
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('stock_seller_') and is_admin(call.from_user.id))
+    def stock_seller(call):
+        seller_id = int(call.data.split('_')[2])
+        # Получаем все варианты товаров с остатками для этого продавца
+        from models import get_seller_stock
+        stocks = get_seller_stock(seller_id)  # возвращает все варианты с quantity
+        if not stocks:
+            # Если нет вообще вариантов (пустой каталог) – редкость
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
+                    seller_name = cur.fetchone()['name']
+            bot.edit_message_text(
+                f"📦 У продавца {seller_name} нет товаров в каталоге.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            return
+
+        seller_name = stocks[0]['seller_name'] if 'seller_name' in stocks[0] else "Продавец"
+        lines = []
+        for row in stocks:
+            if row['quantity'] > 0:
+                lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт")
+            elif row['quantity'] < 0:
+                lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт (❗ минус)")
+            else:
+                lines.append(f"• {row['product_name']} ({row['variant_name']}): 0 шт")
+        bot.edit_message_text(
+            f"📦 *Остатки продавца {seller_name}:*\n\n" + "\n".join(lines),
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "stock_all" and is_admin(call.from_user.id))
+    def stock_all(call):
+        # Получаем все варианты товаров
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT v.id, v.name as variant_name, p.id as product_id, p.name as product_name
+                    FROM product_variants v
+                    JOIN products p ON v.product_id = p.id
+                    WHERE v.name != 'Россыпь'
+                    ORDER BY p.name, v.sort_order
+                """)
+                all_variants = cur.fetchall()
+
+        # Получаем суммарные остатки по каждому варианту от всех продавцов (кроме хаба? включаем всех)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT variant_id, SUM(quantity) as total
+                    FROM seller_stock
+                    GROUP BY variant_id
+                """)
+                totals = {row['variant_id']: row['total'] for row in cur.fetchall()}
+
+        lines = []
+        for v in all_variants:
+            qty = totals.get(v['id'], 0)
+            if qty > 0:
+                lines.append(f"• {v['product_name']} ({v['variant_name']}): {qty} шт")
+            elif qty < 0:
+                lines.append(f"• {v['product_name']} ({v['variant_name']}): {qty} шт (❗ минус)")
+            else:
+                lines.append(f"• {v['product_name']} ({v['variant_name']}): 0 шт")
+
+        bot.edit_message_text(
+            "📊 *Общие остатки по всем продавцам:*\n\n" + "\n".join(lines),
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+        bot.answer_callback_query(call.id)
 
     @bot.message_handler(func=lambda m: m.text == "💰 Выплаты" and is_admin(m.from_user.id))
     def handle_payments_stats(message):
