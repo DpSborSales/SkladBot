@@ -88,6 +88,7 @@ def register_transfer_handlers(bot):
             return
 
         transfer_sessions[user_id] = {
+            'product_id': product_id,
             'variant_id': variant_id,
             'chat_id': call.message.chat.id,
             'message_id': call.message.message_id
@@ -140,9 +141,12 @@ def register_transfer_handlers(bot):
                     reply_markup=markup
                 )
                 logger.info(f"Заявка {request_id} отправлена кладовщику")
+                bot.reply_to(message, f"✅ Заявка на перемещение создана (№{request_id}). Ожидайте подтверждения.")
             except Exception as e:
                 logger.error(f"Ошибка отправки кладовщику: {e}")
-        bot.reply_to(message, f"✅ Заявка на перемещение создана (№{request_id}). Ожидайте подтверждения.")
+                bot.reply_to(message, "❌ Не удалось уведомить кладовщика, но заявка сохранена.")
+        else:
+            bot.reply_to(message, f"✅ Заявка на перемещение создана (№{request_id}).")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
     def approve_transfer(call):
