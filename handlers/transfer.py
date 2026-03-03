@@ -12,7 +12,7 @@ from config import HUB_SELLER_ID
 
 logger = logging.getLogger(__name__)
 
-transfer_sessions = {}  # user_id -> session data
+transfer_sessions = {}
 
 def register_transfer_handlers(bot):
     @bot.message_handler(func=lambda m: m.text == "🔄 Заявка на перемещение")
@@ -30,10 +30,9 @@ def register_transfer_handlers(bot):
             )
             return
 
-        # Инициализируем сессию для новой заявки
         transfer_sessions[user_id] = {
             'seller_id': seller['id'],
-            'items': {},  # ключ variant_id -> {'variant_id': ..., 'quantity': ...}
+            'items': {},
             'chat_id': message.chat.id
         }
         show_product_list(user_id)
@@ -123,26 +122,21 @@ def register_transfer_handlers(bot):
                 raise ValueError
         except ValueError:
             bot.reply_to(message, "❌ Введите положительное целое число.")
-            # Возвращаемся к выбору товара
             show_product_list(user_id)
             return
 
-        # Сохраняем позицию (если уже была, перезаписываем)
         session['items'][variant_id] = {
             'variant_id': variant_id,
             'product_id': product_id,
             'quantity': qty
         }
         logger.info(f"✅ Добавлена позиция variant {variant_id}, qty {qty}")
-
-        # Показываем сводку
         show_summary(user_id)
 
     def show_summary(user_id):
         session = transfer_sessions.get(user_id)
         if not session:
             return
-
         items = session['items'].values()
         if not items:
             show_product_list(user_id)
@@ -154,7 +148,7 @@ def register_transfer_handlers(bot):
             if variant:
                 lines.append(f"• {variant['product_name']} ({variant['name']}): {item['quantity']} шт")
             else:
-                lines.append(f"• Товар {item['product_id']} (вариант {item['variant_id']}): {item['quantity']} шт")
+                lines.append(f"• Товар (вариант {item['variant_id']}): {item['quantity']} шт")
         summary = "\n".join(lines)
 
         markup = types.InlineKeyboardMarkup()
@@ -173,7 +167,6 @@ def register_transfer_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "transfer_add")
     def transfer_add(call):
         user_id = call.from_user.id
-        # Удаляем сообщение со сводкой и показываем список товаров
         bot.delete_message(call.message.chat.id, call.message.message_id)
         show_product_list(user_id)
         bot.answer_callback_query(call.id)
@@ -215,9 +208,7 @@ def register_transfer_handlers(bot):
             return
 
         try:
-            # Создаём заголовок заявки
             request_id = create_transfer_request(HUB_SELLER_ID, seller['id'])
-            # Добавляем позиции
             for item in items:
                 add_transfer_request_item(request_id, item['variant_id'], item['quantity'])
             logger.info(f"✅ Заявка на перемещение {request_id} создана с {len(items)} позициями")
@@ -226,23 +217,23 @@ def register_transfer_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Не удалось создать заявку из-за внутренней ошибки.", show_alert=True)
             return
 
-        # Уведомляем кладовщика
+        # Отправляем уведомление кладовщику
         hub_seller = get_seller_by_id(HUB_SELLER_ID)
         if hub_seller:
-            # Формируем текст с позициями
-            lines = []
-            for item in items:
-                variant = get_variant(item['variant_id'])
-                if variant:
-                    lines.append(f"• {variant['product_name']} ({variant['name']}): {item['quantity']} шт")
-            items_text = "\n".join(lines)
-
-            markup = types.InlineKeyboardMarkup()
-            markup.row(
-                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{request_id}"),
-                types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{request_id}")
-            )
             try:
+                # Формируем текст с позициями
+                lines = []
+                for item in items:
+                    variant = get_variant(item['variant_id'])
+                    if variant:
+                        lines.append(f"• {variant['product_name']} ({variant['name']}): {item['quantity']} шт")
+                items_text = "\n".join(lines)
+
+                markup = types.InlineKeyboardMarkup()
+                markup.row(
+                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{request_id}"),
+                    types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{request_id}")
+                )
                 bot.send_message(
                     hub_seller['telegram_id'],
                     f"📦 *Новая заявка на перемещение №{request_id}*\n\n"
@@ -251,18 +242,28 @@ def register_transfer_handlers(bot):
                     parse_mode='Markdown',
                     reply_markup=markup
                 )
-                logger.info(f"Заявка {request_id} отправлена кладовщику")
+                logger.info(f"Уведомление о заявке {request_id} отправлено кладовщику")
             except Exception as e:
-                logger.error(f"Ошибка отправки кладовщику: {e}")
+                logger.error(f"Ошибка отправки уведомления кладовщику: {e}")
 
         bot.edit_message_text(
-            f"✅ Заявка на перемещение №{request_id} создана и отправлена кладовщику.",
+            f"✅ Заявка на перемещение №{request_id} создана. Ожидайте подтверждения кладовщиком.",
             call.message.chat.id,
             call.message.message_id
         )
         bot.answer_callback_query(call.id, "✅ Заявка создана")
 
-    # Обработчики для кладовщика (подтверждение/отклонение) – остаются почти без изменений, но нужно получать позиции
+    @bot.callback_query_handler(func=lambda call: call.data == "transfer_finish")
+    def transfer_finish(call):
+        user_id = call.from_user.id
+        transfer_sessions.pop(user_id, None)
+        bot.edit_message_text(
+            "❌ Создание заявки завершено.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.answer_callback_query(call.id)
+
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
     def approve_transfer(call):
         user_id = call.from_user.id
@@ -280,9 +281,7 @@ def register_transfer_handlers(bot):
             return
 
         try:
-            # Выполняем перемещение по каждой позиции
             for item in request['items']:
-                # Списать со склада хаба
                 decrease_seller_stock(
                     seller_id=HUB_SELLER_ID,
                     variant_id=item['variant_id'],
@@ -290,7 +289,6 @@ def register_transfer_handlers(bot):
                     reason='transfer_out',
                     order_id=None
                 )
-                # Добавить продавцу
                 increase_seller_stock(
                     seller_id=request['to_seller_id'],
                     variant_id=item['variant_id'],
