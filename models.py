@@ -78,7 +78,7 @@ def get_variant(variant_id: int):
 
 # ========== Остатки продавцов (в упаковках) ==========
 def get_seller_stock(seller_id: int, variant_id: int = None):
-    """Если variant_id не указан, возвращает все остатки продавца"""
+    """Если variant_id не указан, возвращает все варианты (в том числе с нулевым остатком)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             if variant_id:
@@ -89,12 +89,16 @@ def get_seller_stock(seller_id: int, variant_id: int = None):
                 row = cur.fetchone()
                 return row['quantity'] if row else 0
             else:
+                # Получаем все варианты (кроме россыпи) и их остатки
                 cur.execute("""
-                    SELECT v.id as variant_id, v.name, v.weight_kg, ss.quantity
-                    FROM seller_stock ss
-                    JOIN product_variants v ON ss.variant_id = v.id
-                    WHERE ss.seller_id = %s
-                    ORDER BY v.product_id, v.sort_order
+                    SELECT v.id as variant_id, v.name as variant_name,
+                           p.id as product_id, p.name as product_name,
+                           COALESCE(ss.quantity, 0) as quantity
+                    FROM product_variants v
+                    JOIN products p ON v.product_id = p.id
+                    LEFT JOIN seller_stock ss ON ss.variant_id = v.id AND ss.seller_id = %s
+                    WHERE v.name != 'Россыпь'
+                    ORDER BY p.name, v.sort_order
                 """, (seller_id,))
                 return cur.fetchall()
 
@@ -107,6 +111,12 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
                 "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND variant_id = %s",
                 (quantity, seller_id, variant_id)
             )
+            # Если обновление не затронуло строки, значит записи не было – создаём с отрицательным значением
+            if cur.rowcount == 0:
+                cur.execute("""
+                    INSERT INTO seller_stock (seller_id, variant_id, quantity)
+                    VALUES (%s, %s, %s)
+                """, (seller_id, variant_id, -quantity))
             cur.execute("""
                 INSERT INTO stock_movements (variant_id, quantity_change, reason, order_id, seller_id)
                 VALUES (%s, %s, %s, %s, %s)
@@ -171,7 +181,6 @@ def increase_hub_stock(product_id: int, quantity_kg: float, reason: str, order_i
                 ON CONFLICT (product_id)
                 DO UPDATE SET quantity_kg = hub_stock.quantity_kg + EXCLUDED.quantity_kg
             """, (product_id, quantity_kg))
-            # Здесь можно добавить запись в movements, если нужно
             conn.commit()
 
 def decrease_hub_stock(product_id: int, quantity_kg: float, reason: str, order_id: int = None):
@@ -183,7 +192,6 @@ def decrease_hub_stock(product_id: int, quantity_kg: float, reason: str, order_i
                 "UPDATE hub_stock SET quantity_kg = quantity_kg - %s WHERE product_id = %s",
                 (quantity_kg, product_id)
             )
-            # Проверка на отрицательные остатки (можно добавить позже)
             conn.commit()
 
 # ========== Заказы ==========
@@ -234,10 +242,10 @@ def update_transfer_request_status(request_id: int, status: str):
 
 # ========== Расчёты с продавцами ==========
 def get_seller_debt(seller_id: int):
-    """Долг продавца = (сумма продаж по цене продавца) - (сумма выплат)"""
+    """Долг продавца = (сумма продаж по цене продавца) + (прямые продажи) - (сумма выплат)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Продажи через заказы (по цене продавца)
+            # Продажи через заказы (по цене продавца) – только подтверждённые (stock_processed)
             cur.execute("""
                 SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_sales
                 FROM orders o, jsonb_array_elements(o.items) i
@@ -246,7 +254,7 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_sales = cur.fetchone()['total_sales']
 
-            # Прямые продажи (по цене продавца)
+            # Прямые продажи (по цене продавца) – из поля price_seller в items
             cur.execute("""
                 SELECT COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as total_direct
                 FROM direct_sales ds, jsonb_array_elements(ds.items) i
@@ -254,7 +262,7 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_direct = cur.fetchone()['total_direct']
 
-            # Выплаты
+            # Выплаты (только подтверждённые)
             cur.execute("""
                 SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid
                 FROM seller_payments
@@ -287,6 +295,17 @@ def get_seller_profit(seller_id: int):
             """, (seller_id,))
             total_seller = cur.fetchone()['total_seller']
 
+            # Добавляем прямые продажи (для прибыли – тоже разница между ценой покупателя и продавца)
+            cur.execute("""
+                SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as direct_buyer,
+                       COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as direct_seller
+                FROM direct_sales ds, jsonb_array_elements(ds.items) i
+                WHERE ds.seller_id = %s
+            """, (seller_id,))
+            row = cur.fetchone()
+            total_buyer += row['direct_buyer']
+            total_seller += row['direct_seller']
+
             profit = total_buyer - total_seller
             return profit, total_buyer, total_seller
 
@@ -312,26 +331,28 @@ def update_payment_status(payment_id: int, status: str, confirmed_amount: int = 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             if confirmed_amount is not None:
-                cur.execute(
-                    "UPDATE seller_payments SET status = %s, confirmed_amount = %s, processed_at = %s WHERE id = %s",
-                    (status, confirmed_amount, datetime.utcnow().isoformat(), payment_id)
-                )
+                cur.execute("""
+                    UPDATE seller_payments SET status = %s, confirmed_amount = %s, processed_at = %s
+                    WHERE id = %s
+                """, (status, confirmed_amount, datetime.utcnow().isoformat(), payment_id))
             else:
-                cur.execute(
-                    "UPDATE seller_payments SET status = %s, processed_at = %s WHERE id = %s",
-                    (status, datetime.utcnow().isoformat(), payment_id)
-                )
+                cur.execute("""
+                    UPDATE seller_payments SET status = %s, processed_at = %s
+                    WHERE id = %s
+                """, (status, datetime.utcnow().isoformat(), payment_id))
             conn.commit()
 
 # ========== Прямые продажи ==========
 def create_direct_sale(seller_id: int, items: list, total: int) -> int:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Преобразуем items в JSON с нужными полями
+            items_json = json.dumps(items)
             cur.execute("""
                 INSERT INTO direct_sales (seller_id, items, total)
                 VALUES (%s, %s, %s)
                 RETURNING id
-            """, (seller_id, json.dumps(items), total))
+            """, (seller_id, items_json, total))
             sale_id = cur.fetchone()['id']
             conn.commit()
             return sale_id
@@ -451,6 +472,7 @@ def get_total_payments_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid FROM seller_payments WHERE status = 'confirmed'")
             total_paid = cur.fetchone()['total_paid']
+            # Общий долг всех продавцов (сумма их долгов)
             cur.execute("""
                 SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_debt
                 FROM orders o, jsonb_array_elements(o.items) i
