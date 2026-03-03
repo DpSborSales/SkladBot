@@ -1,4 +1,4 @@
-# models.py (полный файл с исправлениями)
+# models.py (полный файл с исправлениями для мультитоварных заявок на перемещение)
 import json
 import logging
 from datetime import datetime
@@ -127,32 +127,61 @@ def get_negative_stock_summary(seller_id: int):
             """, (seller_id,))
             return cur.fetchall()
 
-# ========== Заявки на перемещение ==========
-def create_transfer_request(seller_id: int, product_id: int, quantity: int) -> int:
+# ========== Заявки на перемещение (мультитоварные) ==========
+def create_transfer_request(seller_id: int, items: list) -> int:
+    """
+    Создаёт составную заявку на перемещение.
+    items = [{'product_id': int, 'quantity': int}, ...]
+    Возвращает ID созданной заявки.
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Создаём заголовок заявки
             cur.execute("""
-                INSERT INTO transfer_requests (from_seller_id, to_seller_id, product_id, quantity, status)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO transfer_requests (from_seller_id, to_seller_id, status)
+                VALUES (%s, %s, %s)
                 RETURNING id
-            """, (HUB_SELLER_ID, seller_id, product_id, quantity, 'pending'))
+            """, (HUB_SELLER_ID, seller_id, 'pending'))
             request_id = cur.fetchone()['id']
+
+            # Добавляем позиции
+            for item in items:
+                cur.execute("""
+                    INSERT INTO transfer_request_items (request_id, product_id, quantity)
+                    VALUES (%s, %s, %s)
+                """, (request_id, item['product_id'], item['quantity']))
+
             conn.commit()
             return request_id
 
 def get_transfer_request(request_id: int):
+    """Возвращает заявку вместе со списком товаров."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM transfer_requests WHERE id = %s", (request_id,))
-            return cur.fetchone()
+            request = cur.fetchone()
+            if not request:
+                return None
+
+            cur.execute("""
+                SELECT tri.*, p.name as product_name
+                FROM transfer_request_items tri
+                JOIN products p ON tri.product_id = p.id
+                WHERE tri.request_id = %s
+            """, (request_id,))
+            items = cur.fetchall()
+            request['items'] = items
+            return request
 
 def update_transfer_request_status(request_id: int, status: str):
+    """Обновляет статус заявки."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE transfer_requests SET status = %s, processed_at = %s WHERE id = %s",
-                (status, datetime.utcnow().isoformat(), request_id)
-            )
+            cur.execute("""
+                UPDATE transfer_requests
+                SET status = %s, processed_at = %s
+                WHERE id = %s
+            """, (status, datetime.utcnow().isoformat(), request_id))
             conn.commit()
 
 # ========== Расчёты с продавцами ==========
