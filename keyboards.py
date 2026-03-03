@@ -7,7 +7,7 @@ def main_keyboard():
     keyboard.add(types.KeyboardButton("📦 Мои остатки"), types.KeyboardButton("🔄 Заявка на перемещение"))
     keyboard.add(types.KeyboardButton("💰 Выплата админу"))
     keyboard.add(types.KeyboardButton("➕ Зафиксировать продажу"))
-    keyboard.add(types.KeyboardButton("📦 Фасовка"))  # новая кнопка
+    keyboard.add(types.KeyboardButton("📦 Фасовка"))  # только для кладовщика
     keyboard.add(types.KeyboardButton("👑 Админ панель"))
     return keyboard
 
