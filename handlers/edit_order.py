@@ -83,7 +83,7 @@ def register_edit_handlers(bot):
 
         edit_sessions[user_id] = {
             'order_number': order_num,
-            'original_items': {item['productId']: item['quantity'] for item in order['items']},
+            'original_items': {item['productId']: item for item in order['items']},  # сохраняем полную информацию
             'selected_items': {},
             'message_id': call.message.message_id,
             'chat_id': call.message.chat.id
@@ -99,7 +99,17 @@ def register_edit_handlers(bot):
 
         products = get_all_products()
         product_names = {p['id']: p['name'] for p in products}
-        summary = format_selected_summary(session['selected_items'], product_names)
+        # Строим сводку с вариантами
+        selected_lines = []
+        for pid, qty in session['selected_items'].items():
+            # ищем оригинальный товар, чтобы получить variantName
+            original_item = session['original_items'].get(pid)
+            if original_item and original_item.get('variantName'):
+                name = f"{product_names.get(pid, 'Товар')} ({original_item['variantName']})"
+            else:
+                name = product_names.get(pid, 'Товар')
+            selected_lines.append(f"{name} – {qty} упаковок")
+        summary = "\n".join(selected_lines)
 
         markup = types.InlineKeyboardMarkup(row_width=2)
         buttons = []
@@ -168,6 +178,9 @@ def register_edit_handlers(bot):
 
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+        # Получаем вариант из оригинального заказа
+        original_item = session['original_items'].get(product_id)
+        variant_display = f" ({original_item['variantName']})" if original_item and original_item.get('variantName') else ""
 
         markup = types.InlineKeyboardMarkup()
         markup.row(
@@ -177,7 +190,7 @@ def register_edit_handlers(bot):
         )
         bot.send_message(
             session['chat_id'],
-            f"*Заказ {order_num}*\nВы продали *{product_name}* – *{qty}* упаковок, верно?",
+            f"*Заказ {order_num}*\nВы продали *{product_name}{variant_display}* – *{qty}* упаковок, верно?",
             parse_mode='Markdown',
             reply_markup=markup
         )
@@ -267,7 +280,11 @@ def register_edit_handlers(bot):
         product_names = {p['id']: p['name'] for p in products}
         lines = []
         for pid, qty in session['selected_items'].items():
-            name = product_names.get(pid, f"Товар {pid}")
+            original_item = session['original_items'].get(pid)
+            if original_item and original_item.get('variantName'):
+                name = f"{product_names.get(pid, 'Товар')} ({original_item['variantName']})"
+            else:
+                name = product_names.get(pid, 'Товар')
             lines.append(f"• {name}: {qty} упаковок")
         summary = "\n".join(lines)
 
