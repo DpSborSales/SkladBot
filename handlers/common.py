@@ -4,11 +4,11 @@ from telebot import types
 from models import (
     get_seller_by_telegram_id, get_order_by_number, get_all_products,
     get_seller_stock, decrease_seller_stock, mark_order_as_processed,
-    get_negative_stock_summary
+    get_negative_stock_summary, get_pending_transfer_requests_for_hub
 )
 from keyboards import main_keyboard, admin_keyboard
 from notifications import send_negative_stock_warning
-from config import ADMIN_ID
+from config import ADMIN_ID, HUB_SELLER_ID
 from database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def register_common_handlers(bot):
         if not seller:
             bot.reply_to(message, "❌ У вас нет доступа к этому боту.")
             return
-        stocks = get_seller_stock(seller['id'])  # теперь возвращает все варианты с количествами
+        stocks = get_seller_stock(seller['id'])
         if not stocks:
             bot.reply_to(message, "📦 У вас нет товаров на складе.")
             return
@@ -57,6 +57,8 @@ def register_common_handlers(bot):
         if not seller:
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
+
+        # Получаем завершённые заказы, ожидающие обработки
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -64,11 +66,19 @@ def register_common_handlers(bot):
                     WHERE seller_id = %s AND status = 'completed' AND stock_processed = FALSE
                     ORDER BY id DESC
                 """, (seller['id'],))
-                pending = cur.fetchall()
-        if not pending:
-            bot.reply_to(message, "✅ Нет заказов, ожидающих обработки.")
+                pending_orders = cur.fetchall()
+
+        # Если это кладовщик, добавляем заявки на перемещение
+        pending_transfers = []
+        if seller['id'] == HUB_SELLER_ID:
+            pending_transfers = get_pending_transfer_requests_for_hub()
+
+        if not pending_orders and not pending_transfers:
+            bot.reply_to(message, "✅ Нет заказов или заявок, ожидающих обработки.")
             return
-        for order in pending:
+
+        # Отправляем заказы
+        for order in pending_orders:
             order_number = order['order_number']
             items = order['items']
             items_text_lines = []
@@ -86,6 +96,26 @@ def register_common_handlers(bot):
             bot.send_message(
                 message.chat.id,
                 f"📦 *Заказ {order_number}*\n\n{items_text}",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+
+        # Отправляем заявки на перемещение (только для кладовщика)
+        for transfer in pending_transfers:
+            transfer_id = transfer['id']
+            items = transfer['items']
+            items_text_lines = []
+            for item in items:
+                items_text_lines.append(f"• {item['product_name']} ({item['variant_name']}): {item['quantity']} шт")
+            items_text = "\n".join(items_text_lines)
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{transfer_id}"),
+                types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{transfer_id}")
+            )
+            bot.send_message(
+                message.chat.id,
+                f"📦 *Заявка на перемещение №{transfer_id}*\n\n{items_text}",
                 parse_mode='Markdown',
                 reply_markup=markup
             )
