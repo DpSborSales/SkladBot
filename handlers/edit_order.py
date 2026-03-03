@@ -35,7 +35,6 @@ def register_edit_handlers(bot):
             return
 
         for item in order['items']:
-            # Используем variantId вместо productId
             variant_id = item.get('variantId')
             if not variant_id:
                 logger.error(f"В заказе {order_num} отсутствует variantId для товара {item.get('name')}")
@@ -87,10 +86,16 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Нет товаров в каталоге")
             return
 
+        # Сохраняем оригинальные позиции с ключом (product_id, variant_id)
+        original_items = {}
+        for item in order['items']:
+            key = (item['productId'], item.get('variantId'))
+            original_items[key] = item
+
         edit_sessions[user_id] = {
             'order_number': order_num,
-            'original_items': {item['productId']: item for item in order['items']},
-            'selected_items': {},
+            'original_items': original_items,
+            'selected_items': {},  # ключ (product_id, variant_id) -> количество
             'message_id': call.message.message_id,
             'chat_id': call.message.chat.id
         }
@@ -105,9 +110,12 @@ def register_edit_handlers(bot):
 
         products = get_all_products()
         product_names = {p['id']: p['name'] for p in products}
+        # Формируем сводку уже выбранных товаров
         selected_lines = []
-        for pid, qty in session['selected_items'].items():
-            original_item = session['original_items'].get(pid)
+        for (pid, vid), qty in session['selected_items'].items():
+            # Ищем оригинальный товар, чтобы получить variantName
+            orig_key = (pid, vid)
+            original_item = session['original_items'].get(orig_key)
             if original_item and original_item.get('variantName'):
                 name = f"{product_names.get(pid, 'Товар')} ({original_item['variantName']})"
             else:
@@ -149,20 +157,97 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
 
+        # Получаем все варианты этого товара из оригинального заказа
+        variants = []
+        for (pid, vid), item in session['original_items'].items():
+            if pid == product_id:
+                variants.append((vid, item.get('variantName', 'Неизвестный вариант')))
+
+        if not variants:
+            bot.answer_callback_query(call.id, "❌ В заказе нет этого товара")
+            return
+
+        if len(variants) == 1:
+            # Если вариант один, сразу переходим к вводу количества
+            variant_id, variant_name = variants[0]
+            session['current_product'] = product_id
+            session['current_variant'] = variant_id
+            products = get_all_products()
+            product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+            bot.edit_message_text(
+                f"Введите количество для *{product_name} ({variant_name})*:",
+                session['chat_id'],
+                session['message_id'],
+                parse_mode='Markdown'
+            )
+            bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id, variant_id)
+        else:
+            # Показываем кнопки выбора варианта
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            for vid, vname in variants:
+                markup.add(types.InlineKeyboardButton(
+                    vname,
+                    callback_data=f"selvar_{order_num}_{product_id}_{vid}"
+                ))
+            markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data=f"backtoproducts_{order_num}"))
+            bot.edit_message_text(
+                f"Выберите фасовку:",
+                session['chat_id'],
+                session['message_id'],
+                reply_markup=markup
+            )
+        bot.answer_callback_query(call.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('selvar_'))
+    def select_variant(call):
+        user_id = call.from_user.id
+        parts = call.data.split('_')
+        order_num = parts[1]
+        product_id = int(parts[2])
+        variant_id = int(parts[3])
+        logger.info(f"🔘 Выбран вариант {variant_id} для товара {product_id} в заказе {order_num}")
+
+        session = edit_sessions.get(user_id)
+        if not session or session['order_number'] != order_num:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+
+        session['current_product'] = product_id
+        session['current_variant'] = variant_id
+
+        # Находим название варианта
+        variant_name = None
+        for (pid, vid), item in session['original_items'].items():
+            if pid == product_id and vid == variant_id:
+                variant_name = item.get('variantName')
+                break
+        if not variant_name:
+            variant_name = "Неизвестный вариант"
+
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
-
         bot.edit_message_text(
-            f"Введите количество для товара *{product_name}*:",
+            f"Введите количество для *{product_name} ({variant_name})*:",
             session['chat_id'],
             session['message_id'],
             parse_mode='Markdown'
         )
-        bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id)
+        bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id, variant_id)
         bot.answer_callback_query(call.id)
 
-    def process_quantity_input(message, user_id, order_num, product_id):
-        logger.info(f"📝 Ввод количества для товара {product_id}, заказ {order_num}")
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('backtoproducts_'))
+    def back_to_products(call):
+        user_id = call.from_user.id
+        order_num = call.data.split('_')[1]
+        session = edit_sessions.get(user_id)
+        if not session or session['order_number'] != order_num:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла")
+            return
+        show_product_selection(user_id)
+        bot.answer_callback_query(call.id)
+
+    def process_quantity_input(message, user_id, order_num, product_id, variant_id):
+        logger.info(f"📝 Ввод количества для товара {product_id}, вариант {variant_id}, заказ {order_num}")
         session = edit_sessions.get(user_id)
         if not session or session['order_number'] != order_num:
             bot.reply_to(message, "❌ Сессия редактирования истекла. Начните заново.")
@@ -177,23 +262,32 @@ def register_edit_handlers(bot):
             show_product_selection(user_id)
             return
 
-        session['selected_items'][product_id] = qty
-        logger.info(f"✅ Количество для товара {product_id} установлено: {qty}")
+        # Сохраняем выбранное количество для конкретного варианта
+        key = (product_id, variant_id)
+        session['selected_items'][key] = qty
+        logger.info(f"✅ Количество для варианта {variant_id} установлено: {qty}")
+
+        # Получаем название варианта
+        variant_name = None
+        for (pid, vid), item in session['original_items'].items():
+            if pid == product_id and vid == variant_id:
+                variant_name = item.get('variantName')
+                break
+        if not variant_name:
+            variant_name = "Неизвестный вариант"
 
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
-        original_item = session['original_items'].get(product_id)
-        variant_display = f" ({original_item['variantName']})" if original_item and original_item.get('variantName') else ""
 
         markup = types.InlineKeyboardMarkup()
         markup.row(
-            types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"conf_{order_num}_{product_id}"),
-            types.InlineKeyboardButton("✏️ Изменить", callback_data=f"change_{order_num}_{product_id}"),
+            types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"conf_{order_num}_{product_id}_{variant_id}"),
+            types.InlineKeyboardButton("✏️ Изменить", callback_data=f"change_{order_num}_{product_id}_{variant_id}"),
             types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_num}")
         )
         bot.send_message(
             session['chat_id'],
-            f"*Заказ {order_num}*\nВы продали *{product_name}{variant_display}* – *{qty}* упаковок, верно?",
+            f"*Заказ {order_num}*\nВы продали *{product_name} ({variant_name})* – *{qty}* упаковок, верно?",
             parse_mode='Markdown',
             reply_markup=markup
         )
@@ -204,7 +298,8 @@ def register_edit_handlers(bot):
         parts = call.data.split('_')
         order_num = parts[1]
         product_id = int(parts[2])
-        logger.info(f"✅ Подтверждён товар {product_id} для заказа {order_num}")
+        variant_id = int(parts[3])
+        logger.info(f"✅ Подтверждён товар {product_id} вариант {variant_id} для заказа {order_num}")
 
         session = edit_sessions.get(user_id)
         if not session or session['order_number'] != order_num:
@@ -221,7 +316,8 @@ def register_edit_handlers(bot):
         parts = call.data.split('_')
         order_num = parts[1]
         product_id = int(parts[2])
-        logger.info(f"✏️ Изменение товара {product_id} для заказа {order_num}")
+        variant_id = int(parts[3])
+        logger.info(f"✏️ Изменение товара {product_id} вариант {variant_id} для заказа {order_num}")
 
         session = edit_sessions.get(user_id)
         if not session or session['order_number'] != order_num:
@@ -229,14 +325,24 @@ def register_edit_handlers(bot):
             return
 
         bot.delete_message(session['chat_id'], call.message.message_id)
+
+        # Находим название варианта
+        variant_name = None
+        for (pid, vid), item in session['original_items'].items():
+            if pid == product_id and vid == variant_id:
+                variant_name = item.get('variantName')
+                break
+        if not variant_name:
+            variant_name = "Неизвестный вариант"
+
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
         bot.send_message(
             session['chat_id'],
-            f"Введите новое количество для товара *{product_name}*:",
+            f"Введите новое количество для товара *{product_name} ({variant_name})*:",
             parse_mode='Markdown'
         )
-        bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id)
+        bot.register_next_step_handler_by_chat_id(session['chat_id'], process_quantity_input, user_id, order_num, product_id, variant_id)
         bot.answer_callback_query(call.id)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_'))
@@ -282,8 +388,10 @@ def register_edit_handlers(bot):
         products = get_all_products()
         product_names = {p['id']: p['name'] for p in products}
         lines = []
-        for pid, qty in session['selected_items'].items():
-            original_item = session['original_items'].get(pid)
+        for (pid, vid), qty in session['selected_items'].items():
+            # Находим оригинальный товар для этого варианта
+            orig_key = (pid, vid)
+            original_item = session['original_items'].get(orig_key)
             if original_item and original_item.get('variantName'):
                 name = f"{product_names.get(pid, 'Товар')} ({original_item['variantName']})"
             else:
@@ -339,23 +447,22 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
             return
 
-        # Для каждого выбранного товара списываем по variantId
-        for product_id, qty in selected.items():
+        # Списание по каждому выбранному варианту
+        for (pid, vid), qty in selected.items():
             if qty > 0:
-                # Находим оригинальный элемент заказа, чтобы получить variantId
-                original_item = session['original_items'].get(product_id)
-                if not original_item or not original_item.get('variantId'):
-                    logger.error(f"Для товара {product_id} не найден variantId в оригинальном заказе")
-                    bot.answer_callback_query(call.id, f"❌ Ошибка: нет variantId для товара")
+                # Проверяем, что такой вариант есть в оригинальном заказе (по идее должен быть)
+                if (pid, vid) not in session['original_items']:
+                    logger.error(f"Вариант {vid} товара {pid} не найден в оригинальном заказе")
+                    bot.answer_callback_query(call.id, f"❌ Ошибка: вариант не найден")
                     return
                 decrease_seller_stock(
                     seller_id=seller['id'],
-                    variant_id=original_item['variantId'],
+                    variant_id=vid,
                     quantity=qty,
                     reason='sale',
                     order_id=order['id']
                 )
-                logger.info(f"✅ Списано {qty} ед. товара variant {original_item['variantId']}")
+                logger.info(f"✅ Списано {qty} ед. товара variant {vid}")
 
         mark_order_as_processed(order['id'])
         logger.info(f"✅ Заказ {order_num} обработан, списано товаров: {len(selected)}")
@@ -449,4 +556,4 @@ def register_edit_handlers(bot):
                 session['chat_id'],
                 session['message_id']
             )
-        bot.answer_callback_query(call.id)   
+        bot.answer_callback_query(call.id)
