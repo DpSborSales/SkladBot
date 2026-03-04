@@ -4,7 +4,7 @@ from telebot import types
 from models import (
     get_seller_by_telegram_id, get_order_by_number, get_all_products,
     get_seller_stock, decrease_seller_stock, mark_order_as_processed,
-    get_negative_stock_summary, get_pending_transfer_requests_for_hub
+    get_negative_stock_summary, get_hub_stock, get_pending_transfer_requests_for_hub
 )
 from keyboards import main_keyboard, admin_keyboard
 from notifications import send_negative_stock_warning
@@ -38,17 +38,44 @@ def register_common_handlers(bot):
             return
         stocks = get_seller_stock(seller['id'])
         if not stocks:
-            bot.reply_to(message, "📦 У вас нет товаров на складе.")
+            text = "📦 У вас нет товаров на складе."
+        else:
+            lines = []
+            for row in stocks:
+                if row['quantity'] > 0:
+                    lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт")
+                elif row['quantity'] < 0:
+                    lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт (❗ минус)")
+                else:
+                    lines.append(f"• {row['product_name']} ({row['variant_name']}): 0 шт")
+            text = "📦 *Ваши остатки:*\n" + "\n".join(lines)
+
+        markup = None
+        if seller['id'] == HUB_SELLER_ID:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("📦 Остатки хаба (кг)", callback_data="show_hub_stock"))
+
+        bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "show_hub_stock")
+    def show_hub_stock_callback(call):
+        user_id = call.from_user.id
+        seller = get_seller_by_telegram_id(user_id)
+        if not seller or seller['id'] != HUB_SELLER_ID:
+            bot.answer_callback_query(call.id, "❌ У вас нет доступа.")
             return
-        lines = []
-        for row in stocks:
-            if row['quantity'] > 0:
-                lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт")
-            elif row['quantity'] < 0:
-                lines.append(f"• {row['product_name']} ({row['variant_name']}): {row['quantity']} шт (❗ минус)")
-            else:
-                lines.append(f"• {row['product_name']} ({row['variant_name']}): 0 шт")
-        bot.reply_to(message, "📦 *Ваши остатки:*\n" + "\n".join(lines), parse_mode='Markdown')
+
+        hub_stocks = get_hub_stock()
+        if not hub_stocks:
+            bot.send_message(call.message.chat.id, "📦 На хабе нет нерасфасованного товара.")
+        else:
+            lines = []
+            for item in hub_stocks:
+                lines.append(f"• {item['name']}: {item['quantity_kg']} кг")
+            text = "📦 *Остатки на хабе (нерасфасовано):*\n\n" + "\n".join(lines)
+            bot.send_message(call.message.chat.id, text, parse_mode='Markdown')
+
+        bot.answer_callback_query(call.id)
 
     @bot.message_handler(func=lambda m: m.text == "📋 Ожидают обработки")
     def handle_pending_orders(message):
@@ -58,7 +85,6 @@ def register_common_handlers(bot):
             bot.reply_to(message, "❌ У вас нет доступа.")
             return
 
-        # Получаем завершённые заказы, ожидающие обработки
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -68,16 +94,15 @@ def register_common_handlers(bot):
                 """, (seller['id'],))
                 pending_orders = cur.fetchall()
 
-        # Если это кладовщик, добавляем заявки на перемещение
         pending_transfers = []
         if seller['id'] == HUB_SELLER_ID:
+            from models import get_pending_transfer_requests_for_hub
             pending_transfers = get_pending_transfer_requests_for_hub()
 
         if not pending_orders and not pending_transfers:
             bot.reply_to(message, "✅ Нет заказов или заявок, ожидающих обработки.")
             return
 
-        # Отправляем заказы
         for order in pending_orders:
             order_number = order['order_number']
             items = order['items']
@@ -100,7 +125,6 @@ def register_common_handlers(bot):
                 reply_markup=markup
             )
 
-        # Отправляем заявки на перемещение (только для кладовщика)
         for transfer in pending_transfers:
             transfer_id = transfer['id']
             items = transfer['items']
