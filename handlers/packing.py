@@ -20,10 +20,9 @@ def register_packing_handlers(bot):
             bot.reply_to(message, "❌ У вас нет доступа к этому разделу.")
             return
 
-        # Инициализируем сессию для новой фасовки
         packing_sessions[user_id] = {
             'seller_id': seller['id'],
-            'items': {},  # ключ variant_id -> {'variant_id': ..., 'product_id': ..., 'quantity': ...}
+            'items': {},
             'chat_id': message.chat.id
         }
         show_product_list(user_id)
@@ -53,12 +52,18 @@ def register_packing_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
 
+        # Получаем остаток на хабе для этого товара
+        hub_kg = get_hub_stock(product_id)
+        if hub_kg is None:
+            hub_kg = 0
+
         variants = get_product_variants(product_id)
         pack_variants = [v for v in variants if v['name'] != 'Россыпь']
         if not pack_variants:
             bot.answer_callback_query(call.id, "❌ Нет вариантов для фасовки")
             return
 
+        # Показываем варианты фасовки и сообщаем о доступных кг
         markup = types.InlineKeyboardMarkup(row_width=2)
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
@@ -69,10 +74,12 @@ def register_packing_handlers(bot):
                 callback_data=f"pack_var_{product_id}_{v['id']}"
             ))
         markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="pack_back_to_products"))
+
         bot.edit_message_text(
-            f"Выберите фасовку:",
+            f"Вы выбрали *{product_name}*. На хабе доступно *{hub_kg} кг*.\n\nВыберите вариант фасовки:",
             call.message.chat.id,
             call.message.message_id,
+            parse_mode='Markdown',
             reply_markup=markup
         )
         bot.answer_callback_query(call.id)
@@ -116,7 +123,6 @@ def register_packing_handlers(bot):
             show_product_list(user_id)
             return
 
-        # Сохраняем позицию (если уже была, перезаписываем)
         session['items'][variant_id] = {
             'variant_id': variant_id,
             'product_id': product_id,
@@ -124,7 +130,6 @@ def register_packing_handlers(bot):
         }
         logger.info(f"✅ Добавлена позиция variant {variant_id}, qty {qty}")
 
-        # Показываем сводку
         show_summary(user_id)
 
     def show_summary(user_id):
@@ -162,7 +167,6 @@ def register_packing_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "pack_add")
     def pack_add(call):
         user_id = call.from_user.id
-        # Удаляем сообщение со сводкой и показываем список товаров
         bot.delete_message(call.message.chat.id, call.message.message_id)
         show_product_list(user_id)
         bot.answer_callback_query(call.id)
@@ -203,7 +207,6 @@ def register_packing_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Ошибка доступа")
             return
 
-        # Выполняем фасовку по каждой позиции
         success_items = []
         failed_items = []
         for item in items:
@@ -214,21 +217,24 @@ def register_packing_handlers(bot):
                     quantity_packs=item['quantity'],
                     created_by=seller['id']
                 )
-                success_items.append(f"• {get_variant(item['variant_id'])['product_name']} ({get_variant(item['variant_id'])['name']}): {item['quantity']} упаковок")
+                variant = get_variant(item['variant_id'])
+                success_items.append(f"• {variant['product_name']} ({variant['name']}): {item['quantity']} упаковок")
                 logger.info(f"✅ Операция фасовки {op_id} создана")
             except ValueError as e:
-                failed_items.append(f"• {get_variant(item['variant_id'])['product_name']} ({get_variant(item['variant_id'])['name']}): {str(e)}")
+                variant = get_variant(item['variant_id'])
+                failed_items.append(f"• {variant['product_name']} ({variant['name']}): {str(e)}")
                 logger.error(f"Ошибка фасовки для variant {item['variant_id']}: {e}")
             except Exception as e:
-                failed_items.append(f"• {get_variant(item['variant_id'])['product_name']} ({get_variant(item['variant_id'])['name']}): внутренняя ошибка")
+                variant = get_variant(item['variant_id'])
+                failed_items.append(f"• {variant['product_name']} ({variant['name']}): внутренняя ошибка")
                 logger.exception(f"Неизвестная ошибка при фасовке variant {item['variant_id']}")
 
-        # Формируем итоговое сообщение
         result_msg = ""
         if success_items:
             result_msg += "✅ *Успешно расфасовано:*\n" + "\n".join(success_items) + "\n\n"
         if failed_items:
-            result_msg += "❌ *Не удалось расфасовать:*\n" + "\n".join(failed_items)
+            result_msg += "❌ *Не удалось расфасовать:*\n" + "\n".join(failed_items) + "\n\n"
+            result_msg += "Оповестите Админа о необходимости инвентаризации."
 
         if not result_msg:
             result_msg = "❌ Не удалось выполнить фасовку."
@@ -244,7 +250,6 @@ def register_packing_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data == "pack_finish")
     def pack_finish(call):
         user_id = call.from_user.id
-        # Если нажали "Завершить" без товаров – просто выходим
         packing_sessions.pop(user_id, None)
         bot.edit_message_text(
             "❌ Действие завершено.",
