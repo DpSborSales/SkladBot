@@ -68,9 +68,12 @@ def register_transfer_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Нет вариантов для перемещения")
             return
 
-        markup = types.InlineKeyboardMarkup(row_width=2)
+        # Сохраняем название товара в сессии для использования позже
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+        session['product_name'] = product_name
+
+        markup = types.InlineKeyboardMarkup(row_width=2)
         for v in transfer_variants:
             btn_text = f"{product_name} {v['name']}"
             markup.add(types.InlineKeyboardButton(
@@ -96,12 +99,22 @@ def register_transfer_handlers(bot):
         if not session:
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
+        
+        # Получаем название варианта
+        variant = get_variant(variant_id)
+        variant_name = variant['name'] if variant else "Неизвестный вариант"
+        product_name = session.get('product_name', "Товар")
+        
         session['current_product'] = product_id
         session['current_variant'] = variant_id
+        session['variant_name'] = variant_name
+        session['product_name'] = product_name
+        
         bot.edit_message_text(
-            f"Введите количество упаковок:",
+            f"Введите количество упаковок для *{product_name} ({variant_name})*:",
             call.message.chat.id,
-            call.message.message_id
+            call.message.message_id,
+            parse_mode='Markdown'
         )
         bot.register_next_step_handler_by_chat_id(
             call.message.chat.id,
@@ -121,7 +134,9 @@ def register_transfer_handlers(bot):
             if qty <= 0:
                 raise ValueError
         except ValueError:
-            bot.reply_to(message, "❌ Введите положительное целое число.")
+            product_name = session.get('product_name', "Товар")
+            variant_name = session.get('variant_name', "Неизвестный вариант")
+            bot.reply_to(message, f"❌ Введите положительное целое число для {product_name} ({variant_name}).")
             show_product_list(user_id)
             return
 
@@ -217,22 +232,23 @@ def register_transfer_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Не удалось создать заявку из-за внутренней ошибки.", show_alert=True)
             return
 
-        # Уведомляем кладовщика и админа
+        # Формируем текст для уведомлений
+        lines = []
+        for item in items:
+            variant = get_variant(item['variant_id'])
+            if variant:
+                lines.append(f"• {variant['product_name']} ({variant['name']}): {item['quantity']} шт")
+        items_text = "\n".join(lines)
+
+        # Уведомляем кладовщика
         hub_seller = get_seller_by_id(HUB_SELLER_ID)
         if hub_seller:
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{request_id}"),
+                types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{request_id}")
+            )
             try:
-                lines = []
-                for item in items:
-                    variant = get_variant(item['variant_id'])
-                    if variant:
-                        lines.append(f"• {variant['product_name']} ({variant['name']}): {item['quantity']} шт")
-                items_text = "\n".join(lines)
-
-                markup = types.InlineKeyboardMarkup()
-                markup.row(
-                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{request_id}"),
-                    types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{request_id}")
-                )
                 bot.send_message(
                     hub_seller['telegram_id'],
                     f"📦 *Новая заявка на перемещение №{request_id}*\n\n"
@@ -245,7 +261,7 @@ def register_transfer_handlers(bot):
             except Exception as e:
                 logger.error(f"Ошибка отправки уведомления кладовщику: {e}")
 
-        # Отправляем также админу (если он не совпадает с кладовщиком)
+        # Уведомляем администратора
         if ADMIN_ID and ADMIN_ID != hub_seller['telegram_id']:
             try:
                 admin_markup = types.InlineKeyboardMarkup()
@@ -266,7 +282,7 @@ def register_transfer_handlers(bot):
                 logger.error(f"Ошибка отправки уведомления админу: {e}")
 
         bot.edit_message_text(
-            f"✅ Заявка на перемещение №{request_id} создана. Ожидайте подтверждения кладовщиком или администратором.",
+            f"✅ Заявка на перемещение №{request_id} создана. Ожидайте подтверждения.",
             call.message.chat.id,
             call.message.message_id
         )
