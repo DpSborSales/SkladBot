@@ -8,7 +8,7 @@ from models import (
     get_transfer_request_with_items, update_transfer_request_status,
     decrease_seller_stock, increase_seller_stock
 )
-from config import HUB_SELLER_ID
+from config import HUB_SELLER_ID, ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
@@ -217,11 +217,10 @@ def register_transfer_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Не удалось создать заявку из-за внутренней ошибки.", show_alert=True)
             return
 
-        # Отправляем уведомление кладовщику
+        # Уведомляем кладовщика и админа
         hub_seller = get_seller_by_id(HUB_SELLER_ID)
         if hub_seller:
             try:
-                # Формируем текст с позициями
                 lines = []
                 for item in items:
                     variant = get_variant(item['variant_id'])
@@ -246,8 +245,28 @@ def register_transfer_handlers(bot):
             except Exception as e:
                 logger.error(f"Ошибка отправки уведомления кладовщику: {e}")
 
+        # Отправляем также админу (если он не совпадает с кладовщиком)
+        if ADMIN_ID and ADMIN_ID != hub_seller['telegram_id']:
+            try:
+                admin_markup = types.InlineKeyboardMarkup()
+                admin_markup.row(
+                    types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{request_id}"),
+                    types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{request_id}")
+                )
+                bot.send_message(
+                    ADMIN_ID,
+                    f"📦 *Новая заявка на перемещение №{request_id}*\n\n"
+                    f"От: {seller['name']}\n"
+                    f"{items_text}",
+                    parse_mode='Markdown',
+                    reply_markup=admin_markup
+                )
+                logger.info(f"Уведомление о заявке {request_id} отправлено админу")
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления админу: {e}")
+
         bot.edit_message_text(
-            f"✅ Заявка на перемещение №{request_id} создана. Ожидайте подтверждения кладовщиком.",
+            f"✅ Заявка на перемещение №{request_id} создана. Ожидайте подтверждения кладовщиком или администратором.",
             call.message.chat.id,
             call.message.message_id
         )
@@ -267,8 +286,8 @@ def register_transfer_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
     def approve_transfer(call):
         user_id = call.from_user.id
-        seller = get_seller_by_telegram_id(user_id)
-        if not seller or seller['id'] != HUB_SELLER_ID:
+        # Разрешаем кладовщику или администратору
+        if user_id != HUB_SELLER_ID and user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав для подтверждения.")
             return
         request_id = int(call.data.split('_')[2])
@@ -322,8 +341,7 @@ def register_transfer_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_reject_'))
     def reject_transfer(call):
         user_id = call.from_user.id
-        seller = get_seller_by_telegram_id(user_id)
-        if not seller or seller['id'] != HUB_SELLER_ID:
+        if user_id != HUB_SELLER_ID and user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
         request_id = int(call.data.split('_')[2])
@@ -340,7 +358,7 @@ def register_transfer_handlers(bot):
             try:
                 bot.send_message(
                     seller_to['telegram_id'],
-                    f"❌ Ваша заявка на перемещение (№{request_id}) отклонена кладовщиком."
+                    f"❌ Ваша заявка на перемещение (№{request_id}) отклонена."
                 )
             except Exception as e:
                 logger.error(f"Ошибка уведомления продавца: {e}")
