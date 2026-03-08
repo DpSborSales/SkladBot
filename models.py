@@ -103,6 +103,7 @@ def get_seller_stock(seller_id: int, variant_id: int = None):
                 return cur.fetchall()
 
 def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
+    """Уменьшает остаток товара у продавца (списание)"""
     if quantity <= 0:
         return
     variant = get_variant(variant_id)
@@ -112,16 +113,19 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Пытаемся обновить существующую запись
             cur.execute(
                 "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
                 (quantity, seller_id, product_id, variant_id)
             )
+            # Если запись не существовала, создаём с отрицательным значением
             if cur.rowcount == 0:
                 cur.execute("""
                     INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
                     VALUES (%s, %s, %s, %s)
                 """, (seller_id, product_id, variant_id, -quantity))
 
+            # Записываем движение (отрицательное изменение)
             cur.execute("""
                 INSERT INTO stock_movements (product_id, variant_id, quantity_change, reason, order_id, seller_id)
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -129,6 +133,7 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
             conn.commit()
 
 def increase_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
+    """Увеличивает остаток товара у продавца (поступление)"""
     if quantity <= 0:
         return
     variant = get_variant(variant_id)
@@ -144,6 +149,7 @@ def increase_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
                 ON CONFLICT (seller_id, product_id, variant_id)
                 DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
             """, (seller_id, product_id, variant_id, quantity))
+            
             cur.execute("""
                 INSERT INTO stock_movements (product_id, variant_id, quantity_change, reason, order_id, seller_id)
                 VALUES (%s, %s, %s, %s, %s, %s)
