@@ -310,6 +310,46 @@ def get_pending_transfer_requests_for_hub():
                 })
             return list(requests.values())
 
+def get_all_pending_transfer_requests():
+    """Возвращает все заявки на перемещение со статусом 'pending' (для администратора)"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT tr.id, tr.from_seller_id, tr.to_seller_id, tr.status,
+                       tri.variant_id, tri.quantity,
+                       v.name as variant_name, p.name as product_name,
+                       fs.name as from_seller_name, ts.name as to_seller_name
+                FROM transfer_requests tr
+                JOIN transfer_request_items tri ON tr.id = tri.request_id
+                JOIN product_variants v ON tri.variant_id = v.id
+                JOIN products p ON v.product_id = p.id
+                JOIN sellers fs ON tr.from_seller_id = fs.id
+                JOIN sellers ts ON tr.to_seller_id = ts.id
+                WHERE tr.status = 'pending'
+                ORDER BY tr.created_at DESC
+            """)
+            rows = cur.fetchall()
+            requests = {}
+            for row in rows:
+                req_id = row['id']
+                if req_id not in requests:
+                    requests[req_id] = {
+                        'id': req_id,
+                        'from_seller_id': row['from_seller_id'],
+                        'from_seller_name': row['from_seller_name'],
+                        'to_seller_id': row['to_seller_id'],
+                        'to_seller_name': row['to_seller_name'],
+                        'status': row['status'],
+                        'items': []
+                    }
+                requests[req_id]['items'].append({
+                    'variant_id': row['variant_id'],
+                    'quantity': row['quantity'],
+                    'variant_name': row['variant_name'],
+                    'product_name': row['product_name']
+                })
+            return list(requests.values())
+
 # ========== Расчёты с продавцами ==========
 def get_seller_debt(seller_id: int):
     """Долг продавца перед админом.
