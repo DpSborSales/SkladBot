@@ -7,7 +7,8 @@ from models import (
     get_all_sellers_stock, get_pending_payments, get_payment_request,
     update_payment_status, get_seller_debt, get_seller_profit,
     create_purchase, get_purchases_history, get_purchase,
-    get_total_payments_stats, HUB_SELLER_ID, get_seller_by_id
+    get_total_payments_stats, HUB_SELLER_ID, get_seller_by_id,
+    get_all_pending_transfer_requests
 )
 from config import ADMIN_ID
 from keyboards import admin_keyboard
@@ -111,7 +112,6 @@ def register_admin_handlers(bot):
 
     @bot.message_handler(func=lambda m: m.text == "📦 Остатки" and is_admin(m.from_user.id))
     def handle_admin_stock(message):
-        # Получаем всех продавцов, кроме администратора (если нужно исключить)
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -136,20 +136,20 @@ def register_admin_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('stock_seller_') and is_admin(call.from_user.id))
     def stock_seller(call):
         seller_id = int(call.data.split('_')[2])
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
+                seller_row = cur.fetchone()
+                seller_name = seller_row['name'] if seller_row else "Продавец"
         from models import get_seller_stock
-        stocks = get_seller_stock(seller_id)  # возвращает все варианты с quantity
+        stocks = get_seller_stock(seller_id)
         if not stocks:
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
-                    seller_name = cur.fetchone()['name']
             bot.edit_message_text(
                 f"📦 У продавца {seller_name} нет товаров в каталоге.",
                 call.message.chat.id,
                 call.message.message_id
             )
             return
-        seller_name = stocks[0]['seller_name'] if 'seller_name' in stocks[0] else "Продавец"
         lines = []
         for row in stocks:
             if row['quantity'] > 0:
@@ -168,7 +168,6 @@ def register_admin_handlers(bot):
 
     @bot.callback_query_handler(func=lambda call: call.data == "stock_hub" and is_admin(call.from_user.id))
     def stock_hub(call):
-        # Получаем остатки хаба (в кг)
         hub_stocks = get_hub_stock()
         if not hub_stocks:
             bot.edit_message_text(
@@ -190,7 +189,6 @@ def register_admin_handlers(bot):
 
     @bot.callback_query_handler(func=lambda call: call.data == "stock_all" and is_admin(call.from_user.id))
     def stock_all(call):
-        # Получаем все варианты товаров
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -201,10 +199,6 @@ def register_admin_handlers(bot):
                     ORDER BY p.name, v.sort_order
                 """)
                 all_variants = cur.fetchall()
-
-        # Суммарные остатки по каждому варианту от всех продавцов
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
                 cur.execute("""
                     SELECT variant_id, SUM(quantity) as total
                     FROM seller_stock
@@ -239,7 +233,6 @@ def register_admin_handlers(bot):
             logger.error(f"Ошибка в handle_payments_stats: {e}")
             bot.send_message(message.chat.id, "❌ Ошибка при загрузке статистики.")
             return
-        # Получаем всех продавцов
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -430,7 +423,6 @@ def register_admin_handlers(bot):
             return
         session['current_product'] = product_id
 
-        # Получаем закупочную цену товара из базы
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT purchase_price_kg, name FROM products WHERE id = %s", (product_id,))
@@ -444,7 +436,6 @@ def register_admin_handlers(bot):
             bot.answer_callback_query(call.id, "❌ У товара не установлена закупочная цена. Сначала задайте её в базе.")
             return
 
-        # Сохраняем цену в сессии
         session['purchase_price'] = purchase_price
 
         bot.edit_message_text(
@@ -470,7 +461,6 @@ def register_admin_handlers(bot):
             show_product_list_for_purchase(user_id)
             return
 
-        # Берём цену из сессии
         price_per_kg = session.get('purchase_price')
         if not price_per_kg:
             bot.reply_to(message, "❌ Ошибка: цена не найдена. Начните заново.")
@@ -483,7 +473,6 @@ def register_admin_handlers(bot):
             'price_per_kg': price_per_kg
         })
         logger.info(f"✅ Добавлен товар {product_id} в закупку: {qty_kg} кг по {price_per_kg} руб.")
-        # Сразу показываем сводку
         show_purchase_summary(user_id)
 
     def show_purchase_summary(user_id):
@@ -572,3 +561,30 @@ def register_admin_handlers(bot):
             call.message.message_id
         )
         bot.answer_callback_query(call.id)
+
+    # ===== ОБРАБОТЧИК ДЛЯ ЗАЯВОК НА ПЕРЕМЕЩЕНИЕ =====
+    @bot.message_handler(func=lambda m: m.text == "📦 Заявки на перемещение" and is_admin(m.from_user.id))
+    def handle_admin_transfer_requests(message):
+        requests = get_all_pending_transfer_requests()
+        if not requests:
+            bot.send_message(message.chat.id, "✅ Нет активных заявок на перемещение.")
+            return
+        for req in requests:
+            items_text = "\n".join([
+                f"• {item['product_name']} ({item['variant_name']}): {item['quantity']} шт"
+                for item in req['items']
+            ])
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{req['id']}"),
+                types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{req['id']}")
+            )
+            bot.send_message(
+                message.chat.id,
+                f"📦 *Заявка №{req['id']}*\n"
+                f"От: {req['from_seller_name']}\n"
+                f"Кому: {req['to_seller_name']}\n\n"
+                f"{items_text}",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
