@@ -58,10 +58,13 @@ def register_direct_sale_handlers(bot):
             bot.answer_callback_query(call.id, "❌ У товара нет доступных вариантов")
             return
 
-        # Показываем кнопки выбора варианта
-        markup = types.InlineKeyboardMarkup(row_width=2)
+        # Сохраняем название товара в сессии
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
+        session['product_name'] = product_name
+
+        # Показываем кнопки выбора варианта
+        markup = types.InlineKeyboardMarkup(row_width=2)
         for v in variants:
             btn_text = f"{product_name} {v['name']}"
             markup.add(types.InlineKeyboardButton(
@@ -87,12 +90,22 @@ def register_direct_sale_handlers(bot):
         if not session:
             bot.answer_callback_query(call.id, "❌ Сессия истекла")
             return
+        
+        # Получаем название варианта
+        variant = get_variant(variant_id)
+        variant_name = variant['name'] if variant else "Неизвестный вариант"
+        product_name = session.get('product_name', "Товар")
+        
         session['current_product'] = product_id
         session['current_variant'] = variant_id
+        session['variant_name'] = variant_name
+        session['product_name'] = product_name
+        
         bot.edit_message_text(
-            f"Введите количество:",
+            f"Введите количество для *{product_name} ({variant_name})*:",
             call.message.chat.id,
-            call.message.message_id
+            call.message.message_id,
+            parse_mode='Markdown'
         )
         bot.register_next_step_handler_by_chat_id(call.message.chat.id, process_quantity, user_id)
         bot.answer_callback_query(call.id)
@@ -102,12 +115,16 @@ def register_direct_sale_handlers(bot):
         if not session:
             bot.reply_to(message, "❌ Сессия истекла")
             return
+        
+        product_name = session.get('product_name', "Товар")
+        variant_name = session.get('variant_name', "Неизвестный вариант")
+        
         try:
             qty = int(message.text.strip())
             if qty <= 0:
                 raise ValueError
         except:
-            bot.reply_to(message, "❌ Введите положительное целое число.")
+            bot.reply_to(message, f"❌ Введите положительное целое число для {product_name} ({variant_name}).")
             show_product_list(user_id)
             return
 
