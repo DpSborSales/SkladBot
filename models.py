@@ -1,11 +1,16 @@
 # models.py
 import json
 import logging
+import math
 from datetime import datetime
 from database import get_db_connection
 from config import HUB_SELLER_ID, ADMIN_ID
 
 logger = logging.getLogger(__name__)
+
+def round_up_to_tens(value):
+    """Округляет число вверх до десятков"""
+    return math.ceil(value / 10) * 10
 
 # ========== Парсинг JSON ==========
 def parse_contact(contact_json):
@@ -39,42 +44,81 @@ def get_seller_by_id(seller_id: int):
 
 # ========== Товары и варианты ==========
 def get_all_products():
-    """Возвращает список всех продуктов с их вариантами"""
+    """Возвращает список всех продуктов с их вариантами и рассчитанными ценами продавца"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, name FROM products ORDER BY name")
+            cur.execute("SELECT id, name, purchase_price_kg FROM products ORDER BY name")
             products = cur.fetchall()
             for p in products:
                 cur.execute("""
-                    SELECT id, name, price, price_seller, weight_kg
+                    SELECT 
+                        id, name, price, weight_kg, packaging_cost
                     FROM product_variants
                     WHERE product_id = %s
                     ORDER BY sort_order
                 """, (p['id'],))
-                p['variants'] = cur.fetchall()
+                variants = cur.fetchall()
+                
+                # Рассчитываем price_seller для каждого варианта
+                for v in variants:
+                    base_cost = (p['purchase_price_kg'] * v['weight_kg']) + (v['packaging_cost'] or 0)
+                    avg_price = (v['price'] + base_cost) / 2
+                    v['price_seller'] = round_up_to_tens(avg_price)
+                
+                p['variants'] = variants
             return products
 
 def get_product_variants(product_id: int):
+    """Возвращает варианты товара с рассчитанными ценами продавца"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Получаем закупочную цену товара
+            cur.execute("SELECT purchase_price_kg FROM products WHERE id = %s", (product_id,))
+            product = cur.fetchone()
+            if not product:
+                return []
+            
+            purchase_price_kg = product['purchase_price_kg']
+            
             cur.execute("""
-                SELECT id, name, price, price_seller, weight_kg
+                SELECT id, name, price, weight_kg, packaging_cost
                 FROM product_variants
                 WHERE product_id = %s
                 ORDER BY sort_order
             """, (product_id,))
-            return cur.fetchall()
+            variants = cur.fetchall()
+            
+            # Рассчитываем price_seller для каждого варианта
+            for v in variants:
+                base_cost = (purchase_price_kg * v['weight_kg']) + (v['packaging_cost'] or 0)
+                avg_price = (v['price'] + base_cost) / 2
+                v['price_seller'] = round_up_to_tens(avg_price)
+            
+            return variants
 
 def get_variant(variant_id: int):
+    """Возвращает информацию о варианте товара с рассчитанной ценой продавца"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT v.*, p.name as product_name, p.id as product_id
+                SELECT 
+                    v.*, 
+                    p.name as product_name, 
+                    p.id as product_id,
+                    p.purchase_price_kg
                 FROM product_variants v
                 JOIN products p ON v.product_id = p.id
                 WHERE v.id = %s
             """, (variant_id,))
-            return cur.fetchone()
+            variant = cur.fetchone()
+            
+            if variant:
+                # Рассчитываем price_seller
+                base_cost = (variant['purchase_price_kg'] * variant['weight_kg']) + (variant['packaging_cost'] or 0)
+                avg_price = (variant['price'] + base_cost) / 2
+                variant['price_seller'] = round_up_to_tens(avg_price)
+            
+            return variant
 
 # ========== Остатки продавцов (в упаковках) ==========
 def get_seller_stock(seller_id: int, variant_id: int = None):
@@ -91,16 +135,34 @@ def get_seller_stock(seller_id: int, variant_id: int = None):
             else:
                 # Получаем все варианты (кроме россыпи) и их остатки
                 cur.execute("""
-                    SELECT v.id as variant_id, v.name as variant_name,
-                           p.id as product_id, p.name as product_name,
-                           COALESCE(ss.quantity, 0) as quantity
+                    SELECT 
+                        v.id as variant_id, 
+                        v.name as variant_name,
+                        p.id as product_id, 
+                        p.name as product_name,
+                        p.purchase_price_kg,
+                        v.price,
+                        v.weight_kg,
+                        v.packaging_cost,
+                        COALESCE(ss.quantity, 0) as quantity,
+                        s.name as seller_name
                     FROM product_variants v
                     JOIN products p ON v.product_id = p.id
                     LEFT JOIN seller_stock ss ON ss.variant_id = v.id AND ss.seller_id = %s
+                    LEFT JOIN sellers s ON s.id = %s
                     WHERE v.name != 'Россыпь'
                     ORDER BY p.name, v.sort_order
-                """, (seller_id,))
-                return cur.fetchall()
+                """, (seller_id, seller_id))
+                
+                stocks = cur.fetchall()
+                
+                # Добавляем рассчитанную цену продавца
+                for row in stocks:
+                    base_cost = (row['purchase_price_kg'] * row['weight_kg']) + (row['packaging_cost'] or 0)
+                    avg_price = (row['price'] + base_cost) / 2
+                    row['price_seller'] = round_up_to_tens(avg_price)
+                
+                return stocks
 
 def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
     """Уменьшает остаток товара у продавца (списание)"""
@@ -544,15 +606,18 @@ def create_packing_operation(product_id: int, variant_id: int, quantity_packs: i
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Проверяем достаточно ли кг на хабе
             cur.execute("SELECT quantity_kg FROM hub_stock WHERE product_id = %s", (product_id,))
             row = cur.fetchone()
             if not row or row['quantity_kg'] < weight_used:
                 raise ValueError("Недостаточно товара на хабе")
 
+            # Уменьшаем хаб
             cur.execute(
                 "UPDATE hub_stock SET quantity_kg = quantity_kg - %s WHERE product_id = %s",
                 (weight_used, product_id)
             )
+            # Увеличиваем остатки кладовщика (HUB_SELLER_ID) по данному варианту
             cur.execute("""
                 INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
                 VALUES (%s, %s, %s, %s)
@@ -560,6 +625,7 @@ def create_packing_operation(product_id: int, variant_id: int, quantity_packs: i
                 DO UPDATE SET quantity = seller_stock.quantity + EXCLUDED.quantity
             """, (HUB_SELLER_ID, product_id, variant_id, quantity_packs))
 
+            # Записываем операцию
             cur.execute("""
                 INSERT INTO packing_operations (product_id, variant_id, quantity_packs, weight_used, created_by)
                 VALUES (%s, %s, %s, %s, %s)
