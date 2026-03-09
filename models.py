@@ -427,20 +427,21 @@ def get_seller_debt(seller_id: int):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             if seller_id == HUB_SELLER_ID:
-                price_field_orders = "v.price"
+                price_field_orders = "(i->>'price')::int"
                 price_field_direct = "(i->>'price')::int"
             else:
-                price_field_orders = "v.price_seller"
+                price_field_orders = "(i->>'price_seller')::int"
                 price_field_direct = "(i->>'price_seller')::int"
 
+            # Продажи через заказы
             cur.execute(f"""
                 SELECT COALESCE(SUM({price_field_orders} * (i->>'quantity')::int), 0) as total_sales
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
             """, (seller_id,))
             total_sales = cur.fetchone()['total_sales']
 
+            # Прямые продажи
             cur.execute(f"""
                 SELECT COALESCE(SUM({price_field_direct} * (i->>'quantity')::int), 0) as total_direct
                 FROM direct_sales ds, jsonb_array_elements(ds.items) i
@@ -448,6 +449,7 @@ def get_seller_debt(seller_id: int):
             """, (seller_id,))
             total_direct = cur.fetchone()['total_direct']
 
+            # Выплаты
             cur.execute("""
                 SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid
                 FROM seller_payments
@@ -468,17 +470,15 @@ def get_seller_profit(seller_id: int):
                 return 0, 0, 0
 
             cur.execute("""
-                SELECT COALESCE(SUM(v.price * (i->>'quantity')::int), 0) as total_buyer
+                SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as total_buyer
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
             """, (seller_id,))
             total_buyer = cur.fetchone()['total_buyer']
 
             cur.execute("""
-                SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_seller
+                SELECT COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as total_seller
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
             """, (seller_id,))
             total_seller = cur.fetchone()['total_seller']
@@ -658,10 +658,11 @@ def get_total_payments_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(SUM(confirmed_amount), 0) as total_paid FROM seller_payments WHERE status = 'confirmed'")
             total_paid = cur.fetchone()['total_paid']
+            
+            # Общий долг всех продавцов - используем поле price_seller из JSON заказов
             cur.execute("""
-                SELECT COALESCE(SUM(v.price_seller * (i->>'quantity')::int), 0) as total_debt
+                SELECT COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as total_debt
                 FROM orders o, jsonb_array_elements(o.items) i
-                JOIN product_variants v ON (i->>'variantId')::int = v.id
                 WHERE o.status = 'completed' AND o.stock_processed = TRUE
             """)
             total_debt = cur.fetchone()['total_debt']
