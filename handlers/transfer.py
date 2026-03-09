@@ -68,7 +68,7 @@ def register_transfer_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Нет вариантов для перемещения")
             return
 
-        # Сохраняем название товара в сессии для использования позже
+        # Сохраняем название товара в сессии
         products = get_all_products()
         product_name = next((p['name'] for p in products if p['id'] == product_id), "Товар")
         session['product_name'] = product_name
@@ -306,16 +306,32 @@ def register_transfer_handlers(bot):
         if user_id != HUB_SELLER_ID and user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав для подтверждения.")
             return
+        
         request_id = int(call.data.split('_')[2])
+        
+        # Получаем информацию о заявке
         request = get_transfer_request_with_items(request_id)
         if not request:
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
+        
+        # Проверяем статус заявки
         if request['status'] != 'pending':
-            bot.answer_callback_query(call.id, f"✅ Заявка уже {request['status']}")
+            status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
+            bot.answer_callback_query(
+                call.id, 
+                f"❌ Заявка уже {status_text}. Повторное подтверждение невозможно.",
+                show_alert=True
+            )
             return
 
+        # Определяем, кто подтверждает
+        completer_name = "Администратор" if user_id == ADMIN_ID else "Кладовщик"
+        completer = get_seller_by_telegram_id(user_id)
+        completer_display = completer['name'] if completer else completer_name
+
         try:
+            # Выполняем перемещение
             for item in request['items']:
                 decrease_seller_stock(
                     seller_id=HUB_SELLER_ID,
@@ -331,27 +347,96 @@ def register_transfer_handlers(bot):
                     reason='transfer_in',
                     order_id=None
                 )
+            
+            # Обновляем статус заявки
+            update_transfer_request_status(request_id, 'approved')
+            logger.info(f"✅ Заявка {request_id} подтверждена {completer_display}")
+            
         except Exception as e:
             logger.error(f"Ошибка при перемещении: {e}")
-            bot.answer_callback_query(call.id, "❌ Ошибка при перемещении (возможно, недостаточно товара на хабе).", show_alert=True)
+            bot.answer_callback_query(
+                call.id, 
+                "❌ Ошибка при перемещении (возможно, недостаточно товара на хабе).", 
+                show_alert=True
+            )
             return
 
-        update_transfer_request_status(request_id, 'approved')
+        # Формируем детальное сообщение о полученных товарах
+        items_received = []
+        for item in request['items']:
+            variant = get_variant(item['variant_id'])
+            if variant:
+                # Склоняем слово "упаковка" в зависимости от количества
+                if item['quantity'] % 10 == 1 and item['quantity'] % 100 != 11:
+                    pack_word = "упаковку"
+                elif 2 <= item['quantity'] % 10 <= 4 and (item['quantity'] % 100 < 10 or item['quantity'] % 100 >= 20):
+                    pack_word = "упаковки"
+                else:
+                    pack_word = "упаковок"
+                    
+                items_received.append(f"• {variant['product_name']} ({variant['name']}) {item['quantity']} {pack_word}")
+        
+        items_text = "\n".join(items_received)
+
+        # Получаем информацию о продавце, который получил товар
         seller_to = get_seller_by_id(request['to_seller_id'])
+        seller_to_name = seller_to['name'] if seller_to else "Неизвестный продавец"
+
+        # Уведомление для продавца, который получил товар
         if seller_to:
             try:
                 bot.send_message(
                     seller_to['telegram_id'],
-                    f"✅ Ваша заявка на перемещение (№{request_id}) подтверждена!\n"
-                    f"Товары перемещены на ваш склад."
+                    f"✅ *Заявка на перемещение остатков №{request_id}*\n"
+                    f"Исполнена *{completer_display}*\n\n"
+                    f"Вы получили:\n{items_text}",
+                    parse_mode='Markdown'
                 )
+                logger.info(f"Уведомление о подтверждении отправлено продавцу {seller_to['telegram_id']}")
             except Exception as e:
                 logger.error(f"Ошибка уведомления продавца: {e}")
-        bot.edit_message_text(
-            f"✅ Заявка {request_id} подтверждена, перемещение выполнено.",
-            call.message.chat.id,
-            call.message.message_id
-        )
+
+        # Уведомление для кладовщика (всегда)
+        hub_seller = get_seller_by_id(HUB_SELLER_ID)
+        if hub_seller:
+            try:
+                bot.send_message(
+                    hub_seller['telegram_id'],
+                    f"✅ *Заявка на перемещение остатков №{request_id}*\n"
+                    f"Исполнена *{completer_display}*\n\n"
+                    f"Продавец *{seller_to_name}* получил:\n{items_text}",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Уведомление о подтверждении отправлено кладовщику")
+            except Exception as e:
+                logger.error(f"Ошибка уведомления кладовщика: {e}")
+
+        # Уведомление для администратора (всегда)
+        if ADMIN_ID:
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"✅ *Заявка на перемещение остатков №{request_id}*\n"
+                    f"Исполнена *{completer_display}*\n\n"
+                    f"Продавец *{seller_to_name}* получил:\n{items_text}",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Уведомление о подтверждении отправлено администратору")
+            except Exception as e:
+                logger.error(f"Ошибка уведомления администратора: {e}")
+
+        # Обновляем сообщение, из которого была нажата кнопка
+        try:
+            bot.edit_message_text(
+                f"✅ *Заявка {request_id} подтверждена {completer_display}*\n\n"
+                f"Продавец *{seller_to_name}* получил:\n{items_text}",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отредактировать сообщение: {e}")
+
         bot.answer_callback_query(call.id, "✅ Заявка подтверждена")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_reject_'))
@@ -360,27 +445,85 @@ def register_transfer_handlers(bot):
         if user_id != HUB_SELLER_ID and user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
+        
         request_id = int(call.data.split('_')[2])
         request = get_transfer_request_with_items(request_id)
         if not request:
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
+        
         if request['status'] != 'pending':
-            bot.answer_callback_query(call.id, f"✅ Заявка уже {request['status']}")
+            status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
+            bot.answer_callback_query(
+                call.id, 
+                f"❌ Заявка уже {status_text}. Повторное отклонение невозможно.",
+                show_alert=True
+            )
             return
+
+        # Определяем, кто отклоняет
+        completer_name = "Администратор" if user_id == ADMIN_ID else "Кладовщик"
+        completer = get_seller_by_telegram_id(user_id)
+        completer_display = completer['name'] if completer else completer_name
+
         update_transfer_request_status(request_id, 'rejected')
+        logger.info(f"❌ Заявка {request_id} отклонена {completer_display}")
+
+        # Получаем информацию о продавце, который создал заявку
         seller_to = get_seller_by_id(request['to_seller_id'])
+        seller_to_name = seller_to['name'] if seller_to else "Неизвестный продавец"
+
+        # Уведомление для продавца, который создал заявку
         if seller_to:
             try:
                 bot.send_message(
                     seller_to['telegram_id'],
-                    f"❌ Ваша заявка на перемещение (№{request_id}) отклонена."
+                    f"❌ *Заявка на перемещение №{request_id}*\n"
+                    f"Отклонена *{completer_display}*.",
+                    parse_mode='Markdown'
                 )
+                logger.info(f"Уведомление об отклонении отправлено продавцу {seller_to['telegram_id']}")
             except Exception as e:
                 logger.error(f"Ошибка уведомления продавца: {e}")
-        bot.edit_message_text(
-            f"❌ Заявка {request_id} отклонена.",
-            call.message.chat.id,
-            call.message.message_id
-        )
+
+        # Уведомление для кладовщика (всегда)
+        hub_seller = get_seller_by_id(HUB_SELLER_ID)
+        if hub_seller:
+            try:
+                bot.send_message(
+                    hub_seller['telegram_id'],
+                    f"❌ *Заявка на перемещение №{request_id}*\n"
+                    f"Отклонена *{completer_display}*.\n"
+                    f"Продавец: {seller_to_name}",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Уведомление об отклонении отправлено кладовщику")
+            except Exception as e:
+                logger.error(f"Ошибка уведомления кладовщика: {e}")
+
+        # Уведомление для администратора (всегда)
+        if ADMIN_ID:
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"❌ *Заявка на перемещение №{request_id}*\n"
+                    f"Отклонена *{completer_display}*.\n"
+                    f"Продавец: {seller_to_name}",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Уведомление об отклонении отправлено администратору")
+            except Exception as e:
+                logger.error(f"Ошибка уведомления администратора: {e}")
+
+        # Обновляем сообщение, из которого была нажата кнопка
+        try:
+            bot.edit_message_text(
+                f"❌ *Заявка {request_id} отклонена {completer_display}*.",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отредактировать сообщение: {e}")
+
         bot.answer_callback_query(call.id, "✅ Заявка отклонена")
