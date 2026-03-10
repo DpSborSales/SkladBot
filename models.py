@@ -164,6 +164,17 @@ def get_seller_stock(seller_id: int, variant_id: int = None):
                 
                 return stocks
 
+def get_seller_stock_with_check(seller_id: int, variant_id: int) -> int:
+    """Возвращает текущий остаток и проверяет наличие записи"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT quantity FROM seller_stock 
+                WHERE seller_id = %s AND variant_id = %s
+            """, (seller_id, variant_id))
+            row = cur.fetchone()
+            return row['quantity'] if row else 0
+
 def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
     """Уменьшает остаток товара у продавца (списание)"""
     if quantity <= 0:
@@ -175,6 +186,17 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Проверяем текущий остаток перед списанием (для логирования)
+            cur.execute(
+                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
+                (seller_id, product_id, variant_id)
+            )
+            current = cur.fetchone()
+            current_qty = current['quantity'] if current else 0
+            
+            logger.info(f"💰 decrease_seller_stock: seller={seller_id}, variant={variant_id}, "
+                       f"product={product_id}, current={current_qty}, decrease_by={quantity}, reason={reason}")
+            
             # Пытаемся обновить существующую запись
             cur.execute(
                 "UPDATE seller_stock SET quantity = quantity - %s WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
@@ -182,6 +204,7 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
             )
             # Если запись не существовала, создаём с отрицательным значением
             if cur.rowcount == 0:
+                logger.info(f"💰 decrease_seller_stock: создаём новую запись с отрицательным значением -{quantity}")
                 cur.execute("""
                     INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
                     VALUES (%s, %s, %s, %s)
@@ -193,6 +216,15 @@ def decrease_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (product_id, variant_id, -quantity, reason, order_id, seller_id))
             conn.commit()
+            
+            # Проверяем результат после списания
+            cur.execute(
+                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
+                (seller_id, product_id, variant_id)
+            )
+            new = cur.fetchone()
+            new_qty = new['quantity'] if new else 0
+            logger.info(f"💰 decrease_seller_stock: после операции new_quantity={new_qty}")
 
 def increase_seller_stock(seller_id: int, variant_id: int, quantity: int, reason: str, order_id: int = None):
     """Увеличивает остаток товара у продавца (поступление)"""
@@ -205,6 +237,17 @@ def increase_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Проверяем текущий остаток перед добавлением (для логирования)
+            cur.execute(
+                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
+                (seller_id, product_id, variant_id)
+            )
+            current = cur.fetchone()
+            current_qty = current['quantity'] if current else 0
+            
+            logger.info(f"💰 increase_seller_stock: seller={seller_id}, variant={variant_id}, "
+                       f"product={product_id}, current={current_qty}, increase_by={quantity}, reason={reason}")
+            
             cur.execute("""
                 INSERT INTO seller_stock (seller_id, product_id, variant_id, quantity)
                 VALUES (%s, %s, %s, %s)
@@ -217,6 +260,15 @@ def increase_seller_stock(seller_id: int, variant_id: int, quantity: int, reason
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (product_id, variant_id, quantity, reason, order_id, seller_id))
             conn.commit()
+            
+            # Проверяем результат после добавления
+            cur.execute(
+                "SELECT quantity FROM seller_stock WHERE seller_id = %s AND product_id = %s AND variant_id = %s",
+                (seller_id, product_id, variant_id)
+            )
+            new = cur.fetchone()
+            new_qty = new['quantity'] if new else 0
+            logger.info(f"💰 increase_seller_stock: после операции new_quantity={new_qty}")
 
 def get_negative_stock_summary(seller_id: int):
     with get_db_connection() as conn:
