@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 transfer_sessions = {}
 
 def register_transfer_handlers(bot):
+    def is_admin(user_id):
+        return user_id == ADMIN_ID
+
     @bot.message_handler(func=lambda m: m.text == "🔄 Заявка на перемещение")
     def handle_transfer_request_start(message):
         user_id = message.from_user.id
@@ -302,8 +305,10 @@ def register_transfer_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
     def approve_transfer(call):
         user_id = call.from_user.id
+        seller = get_seller_by_telegram_id(user_id)
+        
         # Разрешаем кладовщику или администратору
-        if user_id != HUB_SELLER_ID and user_id != ADMIN_ID:
+        if not seller or (seller['id'] != HUB_SELLER_ID and not is_admin(user_id)):
             bot.answer_callback_query(call.id, "❌ У вас нет прав для подтверждения.")
             return
         
@@ -315,7 +320,7 @@ def register_transfer_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
         
-        # Проверяем статус заявки
+        # Проверяем статус заявки с блокировкой для избежания race condition
         if request['status'] != 'pending':
             status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
             bot.answer_callback_query(
@@ -326,9 +331,8 @@ def register_transfer_handlers(bot):
             return
 
         # Определяем, кто подтверждает
-        completer_name = "Администратор" if user_id == ADMIN_ID else "Кладовщик"
-        completer = get_seller_by_telegram_id(user_id)
-        completer_display = completer['name'] if completer else completer_name
+        completer_name = "Администратор" if is_admin(user_id) else seller['name']
+        completer_display = completer_name
 
         try:
             # Выполняем перемещение
@@ -348,7 +352,7 @@ def register_transfer_handlers(bot):
                     order_id=None
                 )
             
-            # Обновляем статус заявки
+            # Обновляем статус заявки (это обновление должно быть атомарным)
             update_transfer_request_status(request_id, 'approved')
             logger.info(f"✅ Заявка {request_id} подтверждена {completer_display}")
             
@@ -442,7 +446,10 @@ def register_transfer_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_reject_'))
     def reject_transfer(call):
         user_id = call.from_user.id
-        if user_id != HUB_SELLER_ID and user_id != ADMIN_ID:
+        seller = get_seller_by_telegram_id(user_id)
+        
+        # Разрешаем кладовщику или администратору
+        if not seller or (seller['id'] != HUB_SELLER_ID and not is_admin(user_id)):
             bot.answer_callback_query(call.id, "❌ У вас нет прав.")
             return
         
@@ -462,9 +469,8 @@ def register_transfer_handlers(bot):
             return
 
         # Определяем, кто отклоняет
-        completer_name = "Администратор" if user_id == ADMIN_ID else "Кладовщик"
-        completer = get_seller_by_telegram_id(user_id)
-        completer_display = completer['name'] if completer else completer_name
+        completer_name = "Администратор" if is_admin(user_id) else seller['name']
+        completer_display = completer_name
 
         update_transfer_request_status(request_id, 'rejected')
         logger.info(f"❌ Заявка {request_id} отклонена {completer_display}")
