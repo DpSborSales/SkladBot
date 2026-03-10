@@ -6,7 +6,8 @@ from models import (
     get_product_variants, get_seller_stock, get_variant,
     create_transfer_request, add_transfer_request_item,
     get_transfer_request_with_items, update_transfer_request_status,
-    decrease_seller_stock, increase_seller_stock
+    decrease_seller_stock, increase_seller_stock,
+    get_seller_stock_with_check
 )
 from config import HUB_SELLER_ID, ADMIN_ID
 
@@ -320,7 +321,7 @@ def register_transfer_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Заявка не найдена")
             return
         
-        # Проверяем статус заявки с блокировкой для избежания race condition
+        # Проверяем статус заявки
         if request['status'] != 'pending':
             status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
             bot.answer_callback_query(
@@ -330,6 +331,21 @@ def register_transfer_handlers(bot):
             )
             return
 
+        # Проверяем, достаточно ли товара у кладовщика
+        insufficient_items = []
+        for item in request['items']:
+            current_stock = get_seller_stock_with_check(HUB_SELLER_ID, item['variant_id'])
+            if current_stock < item['quantity']:
+                variant = get_variant(item['variant_id'])
+                product_name = variant['product_name'] if variant else "Неизвестный товар"
+                variant_name = variant['name'] if variant else "Неизвестный вариант"
+                insufficient_items.append(f"{product_name} ({variant_name}): есть {current_stock}, требуется {item['quantity']}")
+        
+        if insufficient_items:
+            error_msg = "❌ Недостаточно товара у кладовщика:\n" + "\n".join(insufficient_items)
+            bot.answer_callback_query(call.id, error_msg, show_alert=True)
+            return
+
         # Определяем, кто подтверждает
         completer_name = "Администратор" if is_admin(user_id) else seller['name']
         completer_display = completer_name
@@ -337,6 +353,9 @@ def register_transfer_handlers(bot):
         try:
             # Выполняем перемещение
             for item in request['items']:
+                logger.info(f"🔄 Перемещение: кладовщик {HUB_SELLER_ID} -> продавец {request['to_seller_id']}, "
+                           f"variant {item['variant_id']}, quantity {item['quantity']}")
+                
                 decrease_seller_stock(
                     seller_id=HUB_SELLER_ID,
                     variant_id=item['variant_id'],
@@ -352,15 +371,15 @@ def register_transfer_handlers(bot):
                     order_id=None
                 )
             
-            # Обновляем статус заявки (это обновление должно быть атомарным)
+            # Обновляем статус заявки
             update_transfer_request_status(request_id, 'approved')
             logger.info(f"✅ Заявка {request_id} подтверждена {completer_display}")
             
         except Exception as e:
-            logger.error(f"Ошибка при перемещении: {e}")
+            logger.error(f"❌ Ошибка при перемещении: {e}")
             bot.answer_callback_query(
                 call.id, 
-                "❌ Ошибка при перемещении (возможно, недостаточно товара на хабе).", 
+                "❌ Ошибка при перемещении. Проверьте логи.",
                 show_alert=True
             )
             return
@@ -396,9 +415,9 @@ def register_transfer_handlers(bot):
                     f"Вы получили:\n{items_text}",
                     parse_mode='Markdown'
                 )
-                logger.info(f"Уведомление о подтверждении отправлено продавцу {seller_to['telegram_id']}")
+                logger.info(f"✅ Уведомление о подтверждении отправлено продавцу {seller_to['telegram_id']}")
             except Exception as e:
-                logger.error(f"Ошибка уведомления продавца: {e}")
+                logger.error(f"❌ Ошибка уведомления продавца: {e}")
 
         # Уведомление для кладовщика (всегда)
         hub_seller = get_seller_by_id(HUB_SELLER_ID)
@@ -411,9 +430,9 @@ def register_transfer_handlers(bot):
                     f"Продавец *{seller_to_name}* получил:\n{items_text}",
                     parse_mode='Markdown'
                 )
-                logger.info(f"Уведомление о подтверждении отправлено кладовщику")
+                logger.info(f"✅ Уведомление о подтверждении отправлено кладовщику")
             except Exception as e:
-                logger.error(f"Ошибка уведомления кладовщика: {e}")
+                logger.error(f"❌ Ошибка уведомления кладовщика: {e}")
 
         # Уведомление для администратора (всегда)
         if ADMIN_ID:
@@ -425,9 +444,9 @@ def register_transfer_handlers(bot):
                     f"Продавец *{seller_to_name}* получил:\n{items_text}",
                     parse_mode='Markdown'
                 )
-                logger.info(f"Уведомление о подтверждении отправлено администратору")
+                logger.info(f"✅ Уведомление о подтверждении отправлено администратору")
             except Exception as e:
-                logger.error(f"Ошибка уведомления администратора: {e}")
+                logger.error(f"❌ Ошибка уведомления администратора: {e}")
 
         # Обновляем сообщение, из которого была нажата кнопка
         try:
@@ -439,7 +458,7 @@ def register_transfer_handlers(bot):
                 parse_mode='Markdown'
             )
         except Exception as e:
-            logger.error(f"Не удалось отредактировать сообщение: {e}")
+            logger.error(f"❌ Не удалось отредактировать сообщение: {e}")
 
         bot.answer_callback_query(call.id, "✅ Заявка подтверждена")
 
@@ -488,9 +507,9 @@ def register_transfer_handlers(bot):
                     f"Отклонена *{completer_display}*.",
                     parse_mode='Markdown'
                 )
-                logger.info(f"Уведомление об отклонении отправлено продавцу {seller_to['telegram_id']}")
+                logger.info(f"❌ Уведомление об отклонении отправлено продавцу {seller_to['telegram_id']}")
             except Exception as e:
-                logger.error(f"Ошибка уведомления продавца: {e}")
+                logger.error(f"❌ Ошибка уведомления продавца: {e}")
 
         # Уведомление для кладовщика (всегда)
         hub_seller = get_seller_by_id(HUB_SELLER_ID)
@@ -503,9 +522,9 @@ def register_transfer_handlers(bot):
                     f"Продавец: {seller_to_name}",
                     parse_mode='Markdown'
                 )
-                logger.info(f"Уведомление об отклонении отправлено кладовщику")
+                logger.info(f"❌ Уведомление об отклонении отправлено кладовщику")
             except Exception as e:
-                logger.error(f"Ошибка уведомления кладовщика: {e}")
+                logger.error(f"❌ Ошибка уведомления кладовщика: {e}")
 
         # Уведомление для администратора (всегда)
         if ADMIN_ID:
@@ -517,9 +536,9 @@ def register_transfer_handlers(bot):
                     f"Продавец: {seller_to_name}",
                     parse_mode='Markdown'
                 )
-                logger.info(f"Уведомление об отклонении отправлено администратору")
+                logger.info(f"❌ Уведомление об отклонении отправлено администратору")
             except Exception as e:
-                logger.error(f"Ошибка уведомления администратора: {e}")
+                logger.error(f"❌ Ошибка уведомления администратора: {e}")
 
         # Обновляем сообщение, из которого была нажата кнопка
         try:
@@ -530,6 +549,6 @@ def register_transfer_handlers(bot):
                 parse_mode='Markdown'
             )
         except Exception as e:
-            logger.error(f"Не удалось отредактировать сообщение: {e}")
+            logger.error(f"❌ Не удалось отредактировать сообщение: {e}")
 
         bot.answer_callback_query(call.id, "✅ Заявка отклонена")
