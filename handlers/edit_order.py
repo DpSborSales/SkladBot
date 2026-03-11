@@ -3,7 +3,7 @@ from telebot import types
 from models import (
     get_order_by_number, get_seller_by_telegram_id, get_all_products,
     get_product_variants, decrease_seller_stock, mark_order_as_processed,
-    get_negative_stock_summary, get_variant
+    get_negative_stock_summary, get_variant, update_order_total, get_db_connection
 )
 from notifications import send_negative_stock_warning
 
@@ -18,99 +18,47 @@ def register_edit_handlers(bot):
         order_num = call.data.split('_')[1]
         logger.info(f"✅ Нажата кнопка подтверждения заказа {order_num}")
 
-        # 1. Получение заказа
-        logger.info("1. Получаем заказ")
         order = get_order_by_number(order_num)
         if not order:
-            logger.error("Заказ не найден")
+            logger.error(f"Заказ {order_num} не найден")
             bot.answer_callback_query(call.id, "❌ Заказ не найден")
             return
-        logger.info(f"   - заказ получен: id={order.get('id')}, статус={order.get('status')}")
 
-        # 2. Проверка продавца
-        logger.info("2. Проверяем продавца")
         seller = get_seller_by_telegram_id(user_id)
-        if not seller:
-            logger.error("Продавец не найден")
-            bot.answer_callback_query(call.id, "❌ Продавец не найден")
-            return
-        logger.info(f"   - продавец: id={seller['id']}, имя={seller.get('name')}")
-        if order['seller_id'] != seller['id']:
-            logger.error(f"Заказ принадлежит продавцу {order['seller_id']}, а текущий пользователь {seller['id']}")
+        if not seller or order['seller_id'] != seller['id']:
             bot.answer_callback_query(call.id, "❌ Этот заказ не ваш")
             return
 
-        # 3. Проверка статуса обработки
-        logger.info("3. Проверяем, не обработан ли заказ")
         if order.get('stock_processed'):
-            logger.info("Заказ уже обработан")
             bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
             return
-        logger.info("   - заказ не обработан")
 
-        # 4. Списание товаров
-        logger.info("4. Начинаем списание товаров")
-        for idx, item in enumerate(order['items']):
+        # Сумма не меняется, используем исходную
+        for item in order['items']:
             variant_id = item.get('variantId')
-            quantity = item.get('quantity')
-            logger.info(f"   - позиция {idx+1}: variant_id={variant_id}, quantity={quantity}")
             if not variant_id:
                 logger.error(f"В заказе {order_num} отсутствует variantId")
-                bot.answer_callback_query(call.id, "❌ Ошибка данных заказа (нет variantId)")
+                bot.answer_callback_query(call.id, "❌ Ошибка данных заказа")
                 return
-            try:
-                decrease_seller_stock(
-                    seller_id=seller['id'],
-                    variant_id=variant_id,
-                    quantity=quantity,
-                    reason='sale',
-                    order_id=order['id']
-                )
-                logger.info(f"      списание выполнено")
-            except Exception as e:
-                logger.exception(f"Ошибка при списании variant {variant_id}: {e}")
-                bot.answer_callback_query(call.id, "❌ Ошибка списания", show_alert=True)
-                return
-        logger.info("   - все позиции списаны успешно")
-
-        # 5. Пометка заказа как обработанного
-        logger.info("5. Помечаем заказ как обработанный")
-        try:
-            mark_order_as_processed(order['id'])
-            logger.info("   - заказ помечен обработанным")
-        except Exception as e:
-            logger.exception(f"Ошибка при mark_order_as_processed: {e}")
-            bot.answer_callback_query(call.id, "❌ Ошибка обновления заказа", show_alert=True)
-            return
-
-        # 6. Ответ пользователю
-        logger.info("6. Отправляем ответ")
-        try:
-            bot.answer_callback_query(call.id, "✅ Продажа зафиксирована")
-            logger.info("   - answer_callback_query выполнен")
-        except Exception as e:
-            logger.error(f"Ошибка answer_callback_query: {e}")
-
-        try:
-            bot.edit_message_text(
-                f"✅ Заказ {order_num} проведён.",
-                call.message.chat.id,
-                call.message.message_id
+            decrease_seller_stock(
+                seller_id=seller['id'],
+                variant_id=variant_id,
+                quantity=item['quantity'],
+                reason='sale',
+                order_id=order['id']
             )
-            logger.info("   - edit_message_text выполнен")
-        except Exception as e:
-            logger.error(f"Ошибка edit_message_text: {e}")
 
-        # 7. Проверка на отрицательные остатки
-        logger.info("7. Проверяем отрицательные остатки")
+        mark_order_as_processed(order['id'])
+        bot.answer_callback_query(call.id, "✅ Продажа зафиксирована")
+        bot.edit_message_text(
+            f"✅ Заказ {order_num} проведён.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+
         negatives = get_negative_stock_summary(seller['id'])
         if negatives:
             send_negative_stock_warning(bot, call.message.chat.id, seller['id'])
-            logger.info("   - отправлено предупреждение о минусах")
-        else:
-            logger.info("   - отрицательных остатков нет")
-
-        logger.info("✅ Обработка завершена")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('edit_'))
     def handle_edit(call):
@@ -331,12 +279,21 @@ def register_edit_handlers(bot):
 
         products = get_all_products()
         product_dict = {p['id']: p['name'] for p in products}
+        
+        # Пересчитываем новую сумму заказа
+        new_total = 0
         lines = []
         for (pid, vid), qty in positive_items.items():
             variant = get_variant(vid)
-            variant_name = variant['name'] if variant else "Неизвестный вариант"
-            product_name = product_dict.get(pid, "Неизвестный товар")
-            lines.append(f"• {product_name} ({variant_name}): {qty} упаковок")
+            if variant:
+                variant_name = variant['name'] if variant else "Неизвестный вариант"
+                product_name = product_dict.get(pid, "Неизвестный товар")
+                lines.append(f"• {product_name} ({variant_name}): {qty} упаковок")
+                new_total += variant['price_seller'] * qty
+                logger.info(f"💰 Товар {product_name} ({variant_name}) - {qty} шт по {variant['price_seller']} руб.")
+            else:
+                lines.append(f"• Товар (вариант {vid}): {qty} упаковок")
+        
         summary = "\n".join(lines)
 
         markup = types.InlineKeyboardMarkup()
@@ -348,6 +305,7 @@ def register_edit_handlers(bot):
         bot.edit_message_text(
             f"*Заказ {order_num}*\n\n"
             f"*Вы продали:*\n{summary}\n\n"
+            f"*Новая сумма заказа: {new_total} руб.*\n\n"
             "Всё верно?",
             session['chat_id'],
             session['message_id'],
@@ -382,11 +340,39 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
             return
 
+        # Берём только позиции с положительным количеством
         selected = {k: v for k, v in session['selected_items'].items() if v > 0}
         if not selected:
             bot.answer_callback_query(call.id, "❌ Нет товаров для списания")
             return
 
+        # Пересчитываем общую сумму заказа на основе выбранных товаров
+        new_total = 0
+        for (pid, vid), qty in selected.items():
+            # Получаем цену продавца для этого варианта
+            variant = get_variant(vid)
+            if variant:
+                new_total += variant['price_seller'] * qty
+                logger.info(f"💰 Товар {variant['product_name']} ({variant['name']}) - {qty} шт по {variant['price_seller']} руб.")
+            else:
+                logger.error(f"Вариант {vid} не найден")
+
+        # Обновляем поле total в заказе
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE orders SET total = %s WHERE id = %s",
+                        (new_total, order['id'])
+                    )
+                    conn.commit()
+            logger.info(f"✅ Обновлена сумма заказа {order_num}: {order['total']} -> {new_total}")
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении суммы заказа: {e}")
+            bot.answer_callback_query(call.id, "❌ Ошибка обновления суммы заказа", show_alert=True)
+            return
+
+        # Списание по каждому выбранному варианту
         for (pid, vid), qty in selected.items():
             if qty > 0:
                 decrease_seller_stock(
@@ -402,7 +388,7 @@ def register_edit_handlers(bot):
         logger.info(f"✅ Заказ {order_num} обработан, списано товаров: {len(selected)}")
 
         bot.edit_message_text(
-            f"✅ Заказ {order_num} обработан.",
+            f"✅ Заказ {order_num} обработан.\nНовая сумма заказа: {new_total} руб.",
             session['chat_id'],
             session['message_id']
         )
@@ -436,6 +422,7 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "✅ Заказ уже обработан")
             return
 
+        # Сумма не меняется, используем исходную
         for item in order['items']:
             variant_id = item.get('variantId')
             if not variant_id:
@@ -451,8 +438,9 @@ def register_edit_handlers(bot):
             )
 
         mark_order_as_processed(order['id'])
+        
         bot.edit_message_text(
-            f"✅ Заказ {order_num} проведён без изменений.",
+            f"✅ Заказ {order_num} проведён без изменений.\nСумма заказа: {order['total']} руб.",
             session['chat_id'],
             session['message_id']
         )
