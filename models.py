@@ -342,6 +342,16 @@ def mark_order_as_processed(order_id: int):
             cur.execute("UPDATE orders SET stock_processed = TRUE WHERE id = %s", (order_id,))
             conn.commit()
 
+def update_order_total(order_id: int, new_total: int):
+    """Обновляет общую сумму заказа"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE orders SET total = %s WHERE id = %s",
+                (new_total, order_id)
+            )
+            conn.commit()
+
 # ========== Генерация номера заказа ==========
 def generate_order_number(seller_id: int) -> str:
     """Генерирует номер заказа на основе префикса продавца (макс. 3 символа)"""
