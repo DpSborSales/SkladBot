@@ -342,6 +342,50 @@ def mark_order_as_processed(order_id: int):
             cur.execute("UPDATE orders SET stock_processed = TRUE WHERE id = %s", (order_id,))
             conn.commit()
 
+# ========== Генерация номера заказа ==========
+def generate_order_number(seller_id: int) -> str:
+    """Генерирует номер заказа на основе префикса продавца (макс. 3 символа)"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Получаем префикс продавца
+            cur.execute("SELECT seller_prefix FROM sellers WHERE id = %s", (seller_id,))
+            result = cur.fetchone()
+            
+            if not result or not result['seller_prefix']:
+                # Если префикс не задан, используем первую букву имени
+                cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
+                name = cur.fetchone()['name']
+                # Берём первый символ имени (может быть кириллица)
+                prefix = name[0].upper()
+                # Ограничиваем до 3 символов
+                if len(prefix) > 3:
+                    prefix = prefix[:3]
+            else:
+                prefix = result['seller_prefix']
+                # Убеждаемся, что префикс не длиннее 3 символов
+                if len(prefix) > 3:
+                    prefix = prefix[:3]
+            
+            # Получаем последний номер для этого префикса
+            cur.execute("""
+                SELECT order_number FROM orders 
+                WHERE order_number LIKE %s 
+                ORDER BY id DESC LIMIT 1
+            """, (prefix + '%',))
+            
+            last = cur.fetchone()
+            if last:
+                # Извлекаем числовую часть (всё после префикса)
+                num_str = last['order_number'][len(prefix):]
+                if num_str.isdigit():
+                    new_num = int(num_str) + 1
+                else:
+                    new_num = 1
+            else:
+                new_num = 1
+            
+            return f"{prefix}{new_num}"
+
 # ========== Заявки на перемещение (с поддержкой нескольких позиций) ==========
 
 def create_transfer_request(from_seller_id: int, to_seller_id: int) -> int:
@@ -394,6 +438,23 @@ def update_transfer_request_status(request_id: int, status: str):
                 (status, datetime.utcnow().isoformat(), request_id)
             )
             conn.commit()
+
+def update_transfer_request_status_atomic(request_id: int, status: str) -> bool:
+    """Атомарно обновляет статус заявки, возвращает True если обновление выполнено"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Пытаемся обновить только pending заявки
+            cur.execute("""
+                UPDATE transfer_requests 
+                SET status = %s, processed_at = %s 
+                WHERE id = %s AND status = 'pending'
+                RETURNING id
+            """, (status, datetime.utcnow().isoformat(), request_id))
+            
+            # Если обновление затронуло строку - значит успех
+            updated = cur.fetchone() is not None
+            conn.commit()
+            return updated
 
 def get_pending_transfer_requests_for_hub():
     """Возвращает все заявки на перемещение, где кладовщик является отправителем и статус 'pending'"""
