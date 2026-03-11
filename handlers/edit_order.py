@@ -1,4 +1,5 @@
 import logging
+import json  # <-- Добавлен недостающий импорт
 from telebot import types
 from models import (
     get_order_by_number, get_seller_by_telegram_id, get_all_products,
@@ -398,7 +399,7 @@ def register_edit_handlers(bot):
             bot.answer_callback_query(call.id, "❌ Ошибка обновления заказа", show_alert=True)
             return
 
-        # Списание по каждому выбранному варианту (используем variant_id, количество уже учтено)
+        # Списание по каждому выбранному варианту
         for (pid, vid), qty in selected.items():
             if qty > 0:
                 decrease_seller_stock(
