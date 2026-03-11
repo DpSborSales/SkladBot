@@ -290,7 +290,7 @@ def register_edit_handlers(bot):
                 product_name = product_dict.get(pid, "Неизвестный товар")
                 lines.append(f"• {product_name} ({variant_name}): {qty} упаковок")
                 new_total += variant['price_seller'] * qty
-                logger.info(f"💰 Товар {product_name} ({variant_name}) - {qty} шт по {variant['price_seller']} руб.")
+                logger.info(f"💰 Товар {product_name} ({variant_name}) - {qty} шт по {variant['price_seller']} руб., сумма: {variant['price_seller'] * qty}")
             else:
                 lines.append(f"• Товар (вариант {vid}): {qty} упаковок")
         
@@ -353,7 +353,7 @@ def register_edit_handlers(bot):
             variant = get_variant(vid)
             if variant:
                 new_total += variant['price_seller'] * qty
-                logger.info(f"💰 Товар {variant['product_name']} ({variant['name']}) - {qty} шт по {variant['price_seller']} руб.")
+                logger.info(f"💰 Товар {variant['product_name']} ({variant['name']}) - {qty} шт по {variant['price_seller']} руб., сумма: {variant['price_seller'] * qty}")
             else:
                 logger.error(f"Вариант {vid} не найден")
 
@@ -367,6 +367,14 @@ def register_edit_handlers(bot):
                     )
                     conn.commit()
             logger.info(f"✅ Обновлена сумма заказа {order_num}: {order['total']} -> {new_total}")
+            
+            # Проверяем, что обновление действительно произошло
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT total FROM orders WHERE id = %s", (order['id'],))
+                    updated = cur.fetchone()
+                    logger.info(f"✅ Проверка: в БД теперь total = {updated['total']}")
+                    
         except Exception as e:
             logger.error(f"Ошибка при обновлении суммы заказа: {e}")
             bot.answer_callback_query(call.id, "❌ Ошибка обновления суммы заказа", show_alert=True)
