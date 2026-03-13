@@ -353,7 +353,7 @@ def update_order_total(order_id: int, new_total: int):
             conn.commit()
 
 # ========== Генерация номера заказа ==========
-def generate_order_number(seller_id: int) -> str:
+def generate_order_number(seller_id: int, delivery_type: str = None) -> str:
     """Генерирует номер заказа на основе префикса продавца (макс. 3 символа)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -585,12 +585,12 @@ def get_seller_debt(seller_id: int):
 
 def get_seller_profit(seller_id: int):
     """Прибыль продавца = сумма продаж по цене покупателя - сумма продаж по цене продавца.
-       Для кладовщика (HUB_SELLER_ID) обе суммы равны (используется цена покупателя), поэтому прибыль = 0.
+       Для кладовщика (HUB_SELLER_ID) прибыль считается по-другому.
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             if seller_id == HUB_SELLER_ID:
-                # Для кладовщика считаем только продажи по цене покупателя
+                # Для кладовщика считаем только продажи по цене покупателя (прибыль 0)
                 cur.execute("""
                     SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as total_buyer
                     FROM orders o, jsonb_array_elements(o.items) i
@@ -624,7 +624,7 @@ def get_seller_profit(seller_id: int):
             """, (seller_id,))
             total_seller = cur.fetchone()['total_seller']
 
-            # Добавляем прямые продажи
+            # Прямые продажи (по цене покупателя и продавца)
             cur.execute("""
                 SELECT 
                     COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as direct_buyer,
