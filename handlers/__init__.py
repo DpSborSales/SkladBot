@@ -8,9 +8,10 @@ from .direct_sale import register_direct_sale_handlers
 from .packing import register_packing_handlers
 
 def register_all_handlers(bot):
+    # Порядок важен! Сначала общие, потом остальные
     register_common_handlers(bot)
     register_edit_handlers(bot)
-    register_transfer_handlers(bot)
+    register_transfer_handlers(bot)  # Transfer должен быть здесь
     register_payment_handlers(bot)
     register_admin_handlers(bot)
     register_direct_sale_handlers(bot)
