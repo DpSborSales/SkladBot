@@ -24,19 +24,32 @@ def register_admin_handlers(bot):
         return user_id == ADMIN_ID
 
     @bot.message_handler(func=lambda m: m.text == "⏳ Ожидают обработки" and is_admin(m.from_user.id))
-    def handle_pending_payments(message):
-        logger.info("Вызван handle_pending_payments")
+    def handle_pending_items(message):
+        logger.info("Вызван handle_pending_items")
+        
+        # Получаем неподтверждённые выплаты
         try:
-            pending = get_pending_payments()
-            logger.info(f"Найдено неподтверждённых выплат: {len(pending)}")
+            pending_payments = get_pending_payments()
+            logger.info(f"Найдено неподтверждённых выплат: {len(pending_payments)}")
         except Exception as e:
-            logger.error(f"Ошибка в handle_pending_payments: {e}")
-            bot.send_message(message.chat.id, "❌ Произошла ошибка при загрузке выплат.")
+            logger.error(f"Ошибка при загрузке выплат: {e}")
+            pending_payments = []
+        
+        # Получаем неподтверждённые заявки на перемещение
+        try:
+            pending_transfers = get_all_pending_transfer_requests()
+            logger.info(f"Найдено неподтверждённых заявок: {len(pending_transfers)}")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке заявок: {e}")
+            pending_transfers = []
+        
+        # Если ничего нет
+        if not pending_payments and not pending_transfers:
+            bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат или заявок на перемещение.")
             return
-        if not pending:
-            bot.send_message(message.chat.id, "✅ Нет неподтверждённых выплат.")
-            return
-        for p in pending:
+        
+        # Отправляем выплаты
+        for p in pending_payments:
             date_str = p['created_at'][:10] if p['created_at'] else 'неизвестно'
             markup = types.InlineKeyboardMarkup()
             markup.row(
@@ -50,6 +63,27 @@ def register_admin_handlers(bot):
                 f"Сумма: {p['amount']} руб.\n"
                 f"Дата: {date_str}\n\n"
                 f"Действие:",
+                parse_mode='Markdown',
+                reply_markup=markup
+            )
+        
+        # Отправляем заявки на перемещение
+        for req in pending_transfers:
+            items_text = "\n".join([
+                f"• {item['product_name']} ({item['variant_name']}): {item['quantity']} шт"
+                for item in req['items']
+            ])
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Подтвердить", callback_data=f"transfer_approve_{req['id']}"),
+                types.InlineKeyboardButton("❌ Отклонить", callback_data=f"transfer_reject_{req['id']}")
+            )
+            bot.send_message(
+                message.chat.id,
+                f"📦 *Заявка на перемещение №{req['id']}*\n"
+                f"От: {req['from_seller_name']}\n"
+                f"Кому: {req['to_seller_name']}\n\n"
+                f"{items_text}",
                 parse_mode='Markdown',
                 reply_markup=markup
             )
