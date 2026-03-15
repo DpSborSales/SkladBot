@@ -357,24 +357,25 @@ def generate_order_number(seller_id: int, delivery_type: str = None) -> str:
     """Генерирует номер заказа на основе префикса продавца (макс. 3 символа)"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # Получаем префикс продавца
-            cur.execute("SELECT seller_prefix FROM sellers WHERE id = %s", (seller_id,))
-            result = cur.fetchone()
-            
-            if not result or not result['seller_prefix']:
-                # Если префикс не задан, используем первую букву имени
-                cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
-                name = cur.fetchone()['name']
-                # Берём первый символ имени (может быть кириллица)
-                prefix = name[0].upper()
-                # Ограничиваем до 3 символов
-                if len(prefix) > 3:
-                    prefix = prefix[:3]
+            # Если это доставка, используем префикс 'D'
+            if delivery_type == 'courier':
+                prefix = 'D'
             else:
-                prefix = result['seller_prefix']
-                # Убеждаемся, что префикс не длиннее 3 символов
-                if len(prefix) > 3:
-                    prefix = prefix[:3]
+                # Для самовывоза - берем префикс продавца
+                cur.execute("SELECT seller_prefix FROM sellers WHERE id = %s", (seller_id,))
+                result = cur.fetchone()
+                
+                if not result or not result['seller_prefix']:
+                    # Если префикс не задан, используем первую букву имени
+                    cur.execute("SELECT name FROM sellers WHERE id = %s", (seller_id,))
+                    name = cur.fetchone()['name']
+                    prefix = name[0].upper()
+                else:
+                    prefix = result['seller_prefix']
+            
+            # Обрезаем до 3 символов, если нужно
+            if len(prefix) > 3:
+                prefix = prefix[:3]
             
             # Получаем последний номер для этого префикса
             cur.execute("""
@@ -385,7 +386,6 @@ def generate_order_number(seller_id: int, delivery_type: str = None) -> str:
             
             last = cur.fetchone()
             if last:
-                # Извлекаем числовую часть (всё после префикса)
                 num_str = last['order_number'][len(prefix):]
                 if num_str.isdigit():
                     new_num = int(num_str) + 1
@@ -423,12 +423,17 @@ def add_transfer_request_item(request_id: int, variant_id: int, quantity: int):
 
 def get_transfer_request_with_items(request_id: int):
     """Возвращает заявку вместе со всеми позициями"""
+    logger.info(f"🔍 Поиск заявки с ID {request_id}")
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM transfer_requests WHERE id = %s", (request_id,))
             request = cur.fetchone()
             if not request:
+                logger.warning(f"❌ Заявка {request_id} не найдена")
                 return None
+            
+            logger.info(f"✅ Заявка {request_id} найдена, статус: {request['status']}")
+            
             cur.execute("""
                 SELECT tri.*, v.name as variant_name, p.name as product_name
                 FROM transfer_request_items tri
@@ -437,6 +442,8 @@ def get_transfer_request_with_items(request_id: int):
                 WHERE tri.request_id = %s
             """, (request_id,))
             items = cur.fetchall()
+            logger.info(f"📦 Найдено позиций: {len(items)}")
+            
             request['items'] = items
             return request
 
@@ -464,6 +471,10 @@ def update_transfer_request_status_atomic(request_id: int, status: str) -> bool:
             # Если обновление затронуло строку - значит успех
             updated = cur.fetchone() is not None
             conn.commit()
+            if updated:
+                logger.info(f"✅ Атомарное обновление статуса заявки {request_id} на {status}")
+            else:
+                logger.warning(f"❌ Не удалось атомарно обновить статус заявки {request_id} (возможно, уже не pending)")
             return updated
 
 def get_pending_transfer_requests_for_hub():
@@ -585,12 +596,12 @@ def get_seller_debt(seller_id: int):
 
 def get_seller_profit(seller_id: int):
     """Прибыль продавца = сумма продаж по цене покупателя - сумма продаж по цене продавца.
-       Для кладовщика (HUB_SELLER_ID) прибыль считается по-другому.
+       Учитываются ВСЕ продажи (и заказы, и прямые продажи).
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             if seller_id == HUB_SELLER_ID:
-                # Для кладовщика считаем только продажи по цене покупателя (прибыль 0)
+                # Для кладовщика считаем только продажи по цене покупателя
                 cur.execute("""
                     SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as total_buyer
                     FROM orders o, jsonb_array_elements(o.items) i
@@ -607,24 +618,8 @@ def get_seller_profit(seller_id: int):
                 total_buyer += direct_buyer
                 return 0, total_buyer, 0
 
-            # Для обычных продавцов
-            # Продажи по цене покупателя (через заказы)
-            cur.execute("""
-                SELECT COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as total_buyer
-                FROM orders o, jsonb_array_elements(o.items) i
-                WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
-            """, (seller_id,))
-            total_buyer = cur.fetchone()['total_buyer']
-
-            # Продажи по цене продавца (те же заказы)
-            cur.execute("""
-                SELECT COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as total_seller
-                FROM orders o, jsonb_array_elements(o.items) i
-                WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
-            """, (seller_id,))
-            total_seller = cur.fetchone()['total_seller']
-
-            # Прямые продажи (по цене покупателя и продавца)
+            # Для обычных продавцов - считаем ВСЕ продажи
+            # Сначала через direct_sales
             cur.execute("""
                 SELECT 
                     COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as direct_buyer,
@@ -632,9 +627,30 @@ def get_seller_profit(seller_id: int):
                 FROM direct_sales ds, jsonb_array_elements(ds.items) i
                 WHERE ds.seller_id = %s
             """, (seller_id,))
-            row = cur.fetchone()
-            total_buyer += row['direct_buyer']
-            total_seller += row['direct_seller']
+            direct_row = cur.fetchone()
+            
+            # Затем через заказы
+            cur.execute("""
+                SELECT 
+                    COALESCE(SUM((i->>'price')::int * (i->>'quantity')::int), 0) as orders_buyer,
+                    COALESCE(SUM((i->>'price_seller')::int * (i->>'quantity')::int), 0) as orders_seller
+                FROM orders o, jsonb_array_elements(o.items) i
+                WHERE o.seller_id = %s AND o.status = 'completed' AND o.stock_processed = TRUE
+            """, (seller_id,))
+            orders_row = cur.fetchone()
+
+            total_buyer = direct_row['direct_buyer'] + orders_row['orders_buyer']
+            total_seller = direct_row['direct_seller'] + orders_row['orders_seller']
+
+            # Логируем для отладки
+            logger.info(f"💰 get_seller_profit для продавца {seller_id}:")
+            logger.info(f"   direct_buyer = {direct_row['direct_buyer']}")
+            logger.info(f"   direct_seller = {direct_row['direct_seller']}")
+            logger.info(f"   orders_buyer = {orders_row['orders_buyer']}")
+            logger.info(f"   orders_seller = {orders_row['orders_seller']}")
+            logger.info(f"   total_buyer = {total_buyer}")
+            logger.info(f"   total_seller = {total_seller}")
+            logger.info(f"   profit = {total_buyer - total_seller}")
 
             profit = total_buyer - total_seller
             return profit, total_buyer, total_seller
