@@ -19,29 +19,7 @@ def register_transfer_handlers(bot):
     def is_admin(user_id):
         return user_id == ADMIN_ID
 
-    # ========== ОТЛАДОЧНЫЙ ОБРАБОТЧИК ==========
-    # Этот обработчик ловит ВСЕ callback'и и логирует их
-    # Он должен быть первым, чтобы видеть все входящие запросы
-    @bot.callback_query_handler(func=lambda call: True)
-    def debug_all_callbacks(call):
-        """Отлавливает ВСЕ callback'и и логирует их"""
-        logger.info("=" * 60)
-        logger.info(f"🔥 ОТЛАДКА: Получен callback")
-        logger.info(f"   User ID: {call.from_user.id}")
-        logger.info(f"   Data: '{call.data}'")
-        logger.info(f"   Длина: {len(call.data)} байт")
-        logger.info(f"   Message ID: {call.message.message_id if call.message else 'Нет'}")
-        logger.info("=" * 60)
-        
-        # Пробуем ответить, чтобы проверить связь
-        try:
-            bot.answer_callback_query(call.id, f"✅ Получено")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при ответе на callback: {e}")
-        
-        # Возвращаем False, чтобы другие обработчики тоже могли сработать
-        # Это важно! Если вернуть True, цепочка обработчиков прервётся
-        return False
+    # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 
     @bot.message_handler(func=lambda m: m.text == "🔄 Заявка на перемещение")
     def handle_transfer_request_start(message):
@@ -332,7 +310,7 @@ def register_transfer_handlers(bot):
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_approve_'))
     def approve_transfer(call):
         user_id = call.from_user.id
-        logger.info(f"🔄 ПОЛУЧЕН ЗАПРОС НА ПОДТВЕРЖДЕНИЕ: {call.data}")
+        logger.info(f"🔥🔥🔥 approve_transfer сработал! User: {user_id}, Data: {call.data}")
         
         try:
             # Проверяем формат данных
@@ -352,16 +330,17 @@ def register_transfer_handlers(bot):
                 bot.answer_callback_query(call.id, "❌ Неверный ID заявки", show_alert=True)
                 return
 
+            # Сразу отвечаем, чтобы Telegram знал, что callback обработан
+            bot.answer_callback_query(call.id, "⏳ Обрабатывается...")
+
             # Проверяем права
             seller = get_seller_by_telegram_id(user_id)
             if not seller:
                 logger.warning(f"❌ Пользователь {user_id} не найден в таблице sellers")
-                bot.answer_callback_query(call.id, "❌ Вы не авторизованы как продавец", show_alert=True)
                 return
 
             if seller['id'] != HUB_SELLER_ID and not is_admin(user_id):
                 logger.warning(f"❌ Нет прав у пользователя {user_id}. ID продавца: {seller['id']}, HUB_SELLER_ID: {HUB_SELLER_ID}")
-                bot.answer_callback_query(call.id, "❌ У вас нет прав для подтверждения", show_alert=True)
                 return
 
             logger.info(f"✅ Права подтверждены для пользователя {user_id}")
@@ -370,7 +349,6 @@ def register_transfer_handlers(bot):
             request = get_transfer_request_with_items(request_id)
             if not request:
                 logger.error(f"❌ Заявка {request_id} не найдена")
-                bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
                 return
 
             logger.info(f"✅ Заявка {request_id} найдена, статус: {request['status']}")
@@ -379,11 +357,6 @@ def register_transfer_handlers(bot):
             if request['status'] != 'pending':
                 status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
                 logger.warning(f"❌ Заявка уже {status_text}")
-                bot.answer_callback_query(
-                    call.id, 
-                    f"❌ Заявка уже {status_text}. Повторное подтверждение невозможно.",
-                    show_alert=True
-                )
                 return
 
             # Проверяем, достаточно ли товара у кладовщика
@@ -399,18 +372,12 @@ def register_transfer_handlers(bot):
             if insufficient_items:
                 error_msg = "❌ Недостаточно товара у кладовщика:\n" + "\n".join(insufficient_items)
                 logger.error(error_msg)
-                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             # Атомарное обновление статуса
             logger.info(f"🔄 Попытка атомарного обновления статуса заявки {request_id}")
             if not update_transfer_request_status_atomic(request_id, 'approved'):
                 logger.warning(f"❌ Не удалось обновить статус заявки {request_id} (возможно, уже обработана)")
-                bot.answer_callback_query(
-                    call.id, 
-                    "❌ Заявка уже обрабатывается или была обработана ранее.",
-                    show_alert=True
-                )
                 return
 
             logger.info(f"✅ Статус заявки {request_id} успешно обновлён")
@@ -444,12 +411,6 @@ def register_transfer_handlers(bot):
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка при перемещении: {e}")
-                # В случае ошибки не откатываем статус, но логируем
-                bot.answer_callback_query(
-                    call.id, 
-                    "❌ Ошибка при перемещении. Проверьте логи.",
-                    show_alert=True
-                )
                 return
 
             # Формируем детальное сообщение о полученных товарах
@@ -530,20 +491,14 @@ def register_transfer_handlers(bot):
                 if "message is not modified" not in str(e):
                     logger.error(f"❌ Не удалось отредактировать сообщение: {e}")
                 # Игнорируем ошибку "message is not modified"
-
-            bot.answer_callback_query(call.id, "✅ Заявка подтверждена")
             
         except Exception as e:
             logger.exception(f"❌ Критическая ошибка в approve_transfer: {e}")
-            try:
-                bot.answer_callback_query(call.id, "❌ Внутренняя ошибка", show_alert=True)
-            except:
-                pass
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_reject_'))
     def reject_transfer(call):
         user_id = call.from_user.id
-        logger.info(f"❌ ПОЛУЧЕН ЗАПРОС НА ОТКЛОНЕНИЕ: {call.data}")
+        logger.info(f"❌ reject_transfer сработал! User: {user_id}, Data: {call.data}")
         
         try:
             parts = call.data.split('_')
@@ -555,36 +510,27 @@ def register_transfer_handlers(bot):
             request_id = int(parts[2])
             logger.info(f"✅ ID заявки: {request_id}")
 
+            # Сразу отвечаем
+            bot.answer_callback_query(call.id, "⏳ Обрабатывается...")
+
             seller = get_seller_by_telegram_id(user_id)
             if not seller or (seller['id'] != HUB_SELLER_ID and not is_admin(user_id)):
                 logger.warning(f"❌ Нет прав у пользователя {user_id}")
-                bot.answer_callback_query(call.id, "❌ У вас нет прав.", show_alert=True)
                 return
 
             request = get_transfer_request_with_items(request_id)
             if not request:
                 logger.error(f"❌ Заявка {request_id} не найдена")
-                bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
                 return
 
             if request['status'] != 'pending':
                 status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
                 logger.warning(f"❌ Заявка уже {status_text}")
-                bot.answer_callback_query(
-                    call.id, 
-                    f"❌ Заявка уже {status_text}. Повторное отклонение невозможно.",
-                    show_alert=True
-                )
                 return
 
             # Атомарное обновление статуса
             if not update_transfer_request_status_atomic(request_id, 'rejected'):
                 logger.warning(f"❌ Не удалось обновить статус заявки {request_id}")
-                bot.answer_callback_query(
-                    call.id, 
-                    "❌ Заявка уже обрабатывается или была обработана ранее.",
-                    show_alert=True
-                )
                 return
 
             completer_name = "Администратор" if is_admin(user_id) else seller['name']
@@ -647,11 +593,5 @@ def register_transfer_handlers(bot):
                 if "message is not modified" not in str(e):
                     logger.error(f"❌ Не удалось отредактировать сообщение: {e}")
 
-            bot.answer_callback_query(call.id, "✅ Заявка отклонена")
-            
         except Exception as e:
             logger.exception(f"❌ Критическая ошибка в reject_transfer: {e}")
-            try:
-                bot.answer_callback_query(call.id, "❌ Внутренняя ошибка", show_alert=True)
-            except:
-                pass
