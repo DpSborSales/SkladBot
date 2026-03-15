@@ -19,8 +19,6 @@ def register_transfer_handlers(bot):
     def is_admin(user_id):
         return user_id == ADMIN_ID
 
-    # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
-
     @bot.message_handler(func=lambda m: m.text == "🔄 Заявка на перемещение")
     def handle_transfer_request_start(message):
         user_id = message.from_user.id
@@ -312,12 +310,21 @@ def register_transfer_handlers(bot):
         user_id = call.from_user.id
         logger.info(f"🔥🔥🔥 approve_transfer сработал! User: {user_id}, Data: {call.data}")
         
+        # Отправляем сообщение о начале обработки
+        processing_msg = bot.send_message(
+            call.message.chat.id,
+            "⏳ *Обрабатываю запрос...*",
+            parse_mode='Markdown'
+        )
+        
         try:
             # Проверяем формат данных
             parts = call.data.split('_')
             if len(parts) < 3:
+                error_msg = "❌ Ошибка формата данных"
                 logger.error(f"❌ Неверный формат callback_data: {call.data}")
-                bot.answer_callback_query(call.id, "❌ Ошибка формата данных", show_alert=True)
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
             
             # Извлекаем ID заявки
@@ -326,21 +333,26 @@ def register_transfer_handlers(bot):
                 request_id = int(request_id_str)
                 logger.info(f"✅ ID заявки: {request_id}")
             except ValueError:
+                error_msg = "❌ Неверный ID заявки"
                 logger.error(f"❌ Не удалось преобразовать '{request_id_str}' в число")
-                bot.answer_callback_query(call.id, "❌ Неверный ID заявки", show_alert=True)
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
-
-            # Сразу отвечаем, чтобы Telegram знал, что callback обработан
-            bot.answer_callback_query(call.id, "⏳ Обрабатывается...")
 
             # Проверяем права
             seller = get_seller_by_telegram_id(user_id)
             if not seller:
+                error_msg = "❌ Вы не авторизованы как продавец"
                 logger.warning(f"❌ Пользователь {user_id} не найден в таблице sellers")
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             if seller['id'] != HUB_SELLER_ID and not is_admin(user_id):
-                logger.warning(f"❌ Нет прав у пользователя {user_id}. ID продавца: {seller['id']}, HUB_SELLER_ID: {HUB_SELLER_ID}")
+                error_msg = "❌ У вас нет прав для подтверждения"
+                logger.warning(f"❌ Нет прав у пользователя {user_id}")
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             logger.info(f"✅ Права подтверждены для пользователя {user_id}")
@@ -348,7 +360,10 @@ def register_transfer_handlers(bot):
             # Получаем информацию о заявке
             request = get_transfer_request_with_items(request_id)
             if not request:
-                logger.error(f"❌ Заявка {request_id} не найдена")
+                error_msg = f"❌ Заявка {request_id} не найдена"
+                logger.error(error_msg)
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             logger.info(f"✅ Заявка {request_id} найдена, статус: {request['status']}")
@@ -356,7 +371,10 @@ def register_transfer_handlers(bot):
             # Проверяем статус
             if request['status'] != 'pending':
                 status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
-                logger.warning(f"❌ Заявка уже {status_text}")
+                error_msg = f"❌ Заявка уже {status_text}. Повторное подтверждение невозможно."
+                logger.warning(error_msg)
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             # Проверяем, достаточно ли товара у кладовщика
@@ -367,17 +385,27 @@ def register_transfer_handlers(bot):
                     variant = get_variant(item['variant_id'])
                     product_name = variant['product_name'] if variant else "Неизвестный товар"
                     variant_name = variant['name'] if variant else "Неизвестный вариант"
-                    insufficient_items.append(f"{product_name} ({variant_name}): есть {current_stock}, требуется {item['quantity']}")
+                    insufficient_items.append(f"• {product_name} ({variant_name}): есть {current_stock}, требуется {item['quantity']}")
             
             if insufficient_items:
-                error_msg = "❌ Недостаточно товара у кладовщика:\n" + "\n".join(insufficient_items)
+                error_msg = "❌ *Недостаточно товара у кладовщика:*\n" + "\n".join(insufficient_items)
                 logger.error(error_msg)
+                bot.edit_message_text(
+                    error_msg,
+                    call.message.chat.id,
+                    processing_msg.message_id,
+                    parse_mode='Markdown'
+                )
+                bot.answer_callback_query(call.id, "❌ Недостаточно товара", show_alert=True)
                 return
 
             # Атомарное обновление статуса
             logger.info(f"🔄 Попытка атомарного обновления статуса заявки {request_id}")
             if not update_transfer_request_status_atomic(request_id, 'approved'):
-                logger.warning(f"❌ Не удалось обновить статус заявки {request_id} (возможно, уже обработана)")
+                error_msg = "❌ Заявка уже обрабатывается или была обработана ранее."
+                logger.warning(f"❌ Не удалось обновить статус заявки {request_id}")
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             logger.info(f"✅ Статус заявки {request_id} успешно обновлён")
@@ -410,7 +438,10 @@ def register_transfer_handlers(bot):
                 logger.info(f"✅ Заявка {request_id} подтверждена {completer_display}, перемещение выполнено")
                 
             except Exception as e:
+                error_msg = f"❌ Ошибка при перемещении: {str(e)}"
                 logger.error(f"❌ Ошибка при перемещении: {e}")
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, "❌ Ошибка перемещения", show_alert=True)
                 return
 
             # Формируем детальное сообщение о полученных товарах
@@ -477,60 +508,89 @@ def register_transfer_handlers(bot):
                 except Exception as e:
                     logger.error(f"❌ Ошибка уведомления администратора: {e}")
 
-            # Обновляем сообщение, из которого была нажата кнопка
+            # Обновляем сообщение о процессе на успешное завершение
+            success_msg = (
+                f"✅ *Заявка {request_id} подтверждена {completer_display}*\n\n"
+                f"Продавец *{seller_to_name}* получил:\n{items_text}"
+            )
+            bot.edit_message_text(
+                success_msg,
+                call.message.chat.id,
+                processing_msg.message_id,
+                parse_mode='Markdown'
+            )
+            
+            # Удаляем исходное сообщение с кнопками
             try:
-                bot.edit_message_text(
-                    f"✅ *Заявка {request_id} подтверждена {completer_display}*\n\n"
-                    f"Продавец *{seller_to_name}* получил:\n{items_text}",
-                    call.message.chat.id,
-                    call.message.message_id,
-                    parse_mode='Markdown'
-                )
-                logger.info(f"✅ Сообщение успешно обновлено")
+                bot.delete_message(call.message.chat.id, call.message.message_id)
             except Exception as e:
-                if "message is not modified" not in str(e):
-                    logger.error(f"❌ Не удалось отредактировать сообщение: {e}")
-                # Игнорируем ошибку "message is not modified"
+                logger.error(f"Не удалось удалить исходное сообщение: {e}")
+            
+            bot.answer_callback_query(call.id, "✅ Заявка подтверждена")
             
         except Exception as e:
+            error_msg = f"❌ Произошла ошибка: {str(e)}"
             logger.exception(f"❌ Критическая ошибка в approve_transfer: {e}")
+            try:
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, "❌ Ошибка", show_alert=True)
+            except:
+                pass
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith('transfer_reject_'))
     def reject_transfer(call):
         user_id = call.from_user.id
         logger.info(f"❌ reject_transfer сработал! User: {user_id}, Data: {call.data}")
         
+        # Отправляем сообщение о начале обработки
+        processing_msg = bot.send_message(
+            call.message.chat.id,
+            "⏳ *Обрабатываю запрос...*",
+            parse_mode='Markdown'
+        )
+        
         try:
             parts = call.data.split('_')
             if len(parts) < 3:
+                error_msg = "❌ Ошибка формата данных"
                 logger.error(f"❌ Неверный формат callback_data: {call.data}")
-                bot.answer_callback_query(call.id, "❌ Ошибка формата данных", show_alert=True)
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
             
             request_id = int(parts[2])
             logger.info(f"✅ ID заявки: {request_id}")
 
-            # Сразу отвечаем
-            bot.answer_callback_query(call.id, "⏳ Обрабатывается...")
-
             seller = get_seller_by_telegram_id(user_id)
             if not seller or (seller['id'] != HUB_SELLER_ID and not is_admin(user_id)):
+                error_msg = "❌ У вас нет прав для отклонения"
                 logger.warning(f"❌ Нет прав у пользователя {user_id}")
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             request = get_transfer_request_with_items(request_id)
             if not request:
-                logger.error(f"❌ Заявка {request_id} не найдена")
+                error_msg = f"❌ Заявка {request_id} не найдена"
+                logger.error(error_msg)
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             if request['status'] != 'pending':
                 status_text = "подтверждена" if request['status'] == 'approved' else "отклонена"
-                logger.warning(f"❌ Заявка уже {status_text}")
+                error_msg = f"❌ Заявка уже {status_text}. Повторное отклонение невозможно."
+                logger.warning(error_msg)
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             # Атомарное обновление статуса
             if not update_transfer_request_status_atomic(request_id, 'rejected'):
+                error_msg = "❌ Заявка уже обрабатывается или была обработана ранее."
                 logger.warning(f"❌ Не удалось обновить статус заявки {request_id}")
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, error_msg, show_alert=True)
                 return
 
             completer_name = "Администратор" if is_admin(user_id) else seller['name']
@@ -582,16 +642,28 @@ def register_transfer_handlers(bot):
                 except Exception as e:
                     logger.error(f"❌ Ошибка уведомления администратора: {e}")
 
+            # Обновляем сообщение о процессе
+            success_msg = f"❌ *Заявка {request_id} отклонена {completer_display}*."
+            bot.edit_message_text(
+                success_msg,
+                call.message.chat.id,
+                processing_msg.message_id,
+                parse_mode='Markdown'
+            )
+            
+            # Удаляем исходное сообщение с кнопками
             try:
-                bot.edit_message_text(
-                    f"❌ *Заявка {request_id} отклонена {completer_display}*.",
-                    call.message.chat.id,
-                    call.message.message_id,
-                    parse_mode='Markdown'
-                )
+                bot.delete_message(call.message.chat.id, call.message.message_id)
             except Exception as e:
-                if "message is not modified" not in str(e):
-                    logger.error(f"❌ Не удалось отредактировать сообщение: {e}")
-
+                logger.error(f"Не удалось удалить исходное сообщение: {e}")
+            
+            bot.answer_callback_query(call.id, "✅ Заявка отклонена")
+            
         except Exception as e:
+            error_msg = f"❌ Произошла ошибка: {str(e)}"
             logger.exception(f"❌ Критическая ошибка в reject_transfer: {e}")
+            try:
+                bot.edit_message_text(error_msg, call.message.chat.id, processing_msg.message_id)
+                bot.answer_callback_query(call.id, "❌ Ошибка", show_alert=True)
+            except:
+                pass
